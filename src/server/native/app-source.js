@@ -6,8 +6,9 @@
 // bounded HTTPS transport; exact episode matching; supported codec selection.
 // Crypto tables and SDK protocol constants below are not user credentials.
 const crypto = require('node:crypto');
+const { gzipSync } = require('node:zlib');
 const logger = require('../services/logger');
-const { getPlaybackDevice, DEFAULT_VERIFIED_DEVICE } = require('./playback-device');
+const { getPlaybackDevice } = require('./playback-device');
 const sm3 = require('./sm3');
 const { PlayerSigner } = require('./argus');
 const { normalizeDownloadQuality, meetsDownloadQuality } = require('./download-quality');
@@ -15,10 +16,9 @@ const localId = () => String(1000000000000000n + BigInt('0x' + crypto.randomByte
 const PROCESS_NONCE = crypto.randomBytes(18).toString('base64url');
 const PROCESS_STARTED = Date.now();
 const VIDEO_API = 'https://api5-normal-sinfonlineb.fqnovel.com/novel/player/multi_video_model/v1/';
-const SHORTPLAY_API = 'https://api3-normal-sinfonlinea.fqnovel.com/novel/player/video_model/v1/';
 const SEARCH_API = 'https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v';
 const VIDEO_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
-const PLAYBACK_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
+const PLAYBACK_UA = 'com.phoenix.read/74332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
 const SEARCH_UA = 'com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)';
 const DEVICE = {
     ac: 'wifi', channel: 'update_64', aid: '8662', app_name: 'novelread',
@@ -28,7 +28,8 @@ const DEVICE = {
     update_version_code: '71332', host_abi: 'arm64-v8a', dragon_device_type: 'phone', pv_player: '71332',
     compliance_status: '0', need_personal_recommend: '1', player_so_load: '1', is_android_pad_screen: '0',
 };
-const PLAYBACK_DEVICE = { ...DEVICE };
+const PLAYBACK_DEVICE = { ...DEVICE, version_code: '74332', version_name: '7.4.3.32',
+    manifest_version_code: '74332', update_version_code: '74332', pv_player: '74332' };
 function str(value, fallback = '') { return String(value == null ? fallback : value).trim(); }
 function cleanUrl(value) { return str(value).replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/&amp;/g, '&'); }
 function jsonBody(value) { try { return JSON.parse(value); } catch { return null; } }
@@ -133,68 +134,19 @@ function helios(khronos) {
 
 function branchOf(url, body, khronos) { const bodyMd5 = body ? crypto.createHash('md5').update(body).digest() : Buffer.alloc(16); const q = sm3(url.split('?')[1]); const iv = getIv(getIv(getIv(0x20230928, q), bodyMd5), le32(khronos)); const low = iv & 15; return low - (((low * 171) >> 9) * 3); }
 function playbackRequest(payload, identity) {
-    const body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload);
+    const body = gzipSync(Buffer.from(payload));
     const khronos = Math.floor(Date.now() / 1000);
-    const query = pythonUrlEncode({ ...DEVICE, ...identity });
+    const requestTicket = String(Date.now());
+    const query = pythonUrlEncode({ ...PLAYBACK_DEVICE, ...identity, _rticket: requestTicket });
     const url = `${VIDEO_API}?${query}`;
     const signerHeaders = PlayerSigner.headers(query, body, khronos);
-    const headers = {
-        'User-Agent': VIDEO_UA,
-        Accept: 'application/json; charset=utf-8,application/x-protobuf',
-        'Content-Type': 'application/json',
-        'x-xs-from-web': '0',
-        'sdk-version': '2',
+    return { url, body, headers: {
+        'User-Agent': PLAYBACK_UA, Accept: 'application/json; charset=utf-8,application/x-protobuf',
+        'Content-Type': 'application/json; charset=UTF-8', 'Content-Encoding': 'gzip',
+        'sdk-version': '2', 'passport-sdk-version': '5051452', 'x-xs-from-web': '0',
+        'x-ss-dp': '8662',
         ...signerHeaders,
-    };
-    if (identity?.cookie) {
-        headers.Cookie = identity.cookie;
-    }
-    return {
-        url,
-        body,
-        headers,
-    };
-}
-
-function shortplayRequest(vid, identity) {
-    const khronos = Math.floor(Date.now() / 1000);
-    const query = pythonUrlEncode({
-        iid: identity.iid,
-        device_id: identity.device_id,
-        aid: '1967',
-        app_name: 'novelapp',
-        version_code: '72132',
-        version_name: '7.2.1.32',
-        device_platform: 'android',
-        device_brand: 'Xiaomi',
-        os_version: '13',
-        cdid: identity.cdid,
-    });
-    const url = `${SHORTPLAY_API}?${query}`;
-    const payload = JSON.stringify({
-        video_id: String(vid),
-        content_type: 1004,
-        biz_param: {
-            detail_page_version: 0, device_level: 3, disable_digg_stat: false, disable_video_relate_book: false,
-            from_video_id: '', need_all_video_definition: true, need_mp4_align: false, source: 4,
-            use_os_player: false, use_server_dns: false, video_platform: 3,
-        },
-    });
-    const body = Buffer.from(payload);
-    const signerHeaders = PlayerSigner.headers(query, body, khronos);
-    const headers = {
-        'User-Agent': 'com.dragon.read',
-        'Content-Type': 'application/json; charset=utf-8',
-        ...signerHeaders,
-    };
-    if (identity?.cookie) {
-        headers.Cookie = identity.cookie;
-    }
-    return {
-        url,
-        body,
-        headers,
-    };
+    } };
 }
 
 function parseSearchInteger(value) {
@@ -359,14 +311,6 @@ async function requestJson(url, options, deadline, signal) {
         }
         const parsed = typeof response.data === 'string' ? jsonBody(raw) : response.data;
         if (!parsed || typeof parsed !== 'object') throw Object.assign(new Error('App 接口未返回有效数据'), { code: 'INVALID_RESPONSE' });
-        if (response.headers) {
-            Object.defineProperty(parsed, '_headers', {
-                value: response.headers,
-                enumerable: false,
-                writable: true,
-                configurable: true,
-            });
-        }
         return parsed;
     }
     throw Object.assign(new Error('App 片源跳转次数过多'), { code: 'SECURITY_BLOCKED' });
@@ -494,7 +438,6 @@ async function fetchAppPlayUrl(vid, options = {}) {
     }
 
     const payload = JSON.stringify({
-        dr_scene: 'player',
         biz_param: { detail_page_version: 0, device_level: 3, disable_digg_stat: false, need_all_video_definition: true, need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024 },
         mixed_video_id_map: { '1004': batch },
     });
@@ -506,47 +449,13 @@ async function fetchAppPlayUrl(vid, options = {}) {
         response = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
     } catch (err) {
         signal.throwIfAborted();
-        if (err.code === 'EMPTY_RESPONSE') {
+        if (err.code === 'EMPTY_RESPONSE' && typeof getPlaybackDevice.reset === 'function') {
             logger.warn('AppSource', 'App 接口返回空响应，尝试更新播放设备并重试...');
-            let freshDevice = device;
-            if (typeof getPlaybackDevice.fallbackToDefault === 'function' && DEFAULT_VERIFIED_DEVICE && device?.device_id !== DEFAULT_VERIFIED_DEVICE.device_id) {
-                freshDevice = getPlaybackDevice.fallbackToDefault();
-            } else if (typeof getPlaybackDevice.reset === 'function') {
-                getPlaybackDevice.reset(device);
-                freshDevice = await getPlaybackDevice(execRequestJson, signal);
-            }
-            signed = playbackRequest(payload, freshDevice);
-            try {
-                response = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
-            } catch (retryErr) {
-                // 双模型回退：尝试 SHORTPLAY 备用接口
-                try {
-                    const shortSigned = shortplayRequest(vid, freshDevice);
-                    const shortResp = await execRequestJson(shortSigned.url, { method: 'POST', headers: shortSigned.headers, data: shortSigned.body }, deadline, signal);
-                    const entry = shortResp?.data?.[vid] || (shortResp?.data?.video_model ? shortResp.data : null);
-                    if (entry) {
-                        response = { code: 0, data: { [vid]: entry } };
-                    } else {
-                        throw retryErr;
-                    }
-                } catch (_) {
-                    throw retryErr;
-                }
-            }
+            getPlaybackDevice.reset(device);
+            signed = playbackRequest(payload, await getPlaybackDevice(execRequestJson, signal));
+            response = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
         } else {
-            // 尝试 SHORTPLAY 回退
-            try {
-                const shortSigned = shortplayRequest(vid, device);
-                const shortResp = await execRequestJson(shortSigned.url, { method: 'POST', headers: shortSigned.headers, data: shortSigned.body }, deadline, signal);
-                const entry = shortResp?.data?.[vid] || (shortResp?.data?.video_model ? shortResp.data : null);
-                if (entry) {
-                    response = { code: 0, data: { [vid]: entry } };
-                } else {
-                    throw err;
-                }
-            } catch (_) {
-                throw err;
-            }
+            throw err;
         }
     }
     if (Number(response.Code || response.code || 0) !== 0) throw Object.assign(new Error('App 接口暂未提供本集播放信息'), { code: 'BUSINESS_REJECTED' });
@@ -568,4 +477,4 @@ async function fetchAppPlayUrl(vid, options = {}) {
     return await parseEntryPlayInfo(vid, currentEntry, requestedQuality, allowLowerQuality, deadline, signal, options.allowBytevc2 === true);
 }
 
-module.exports = { fetchAppPlayUrl, clearEntryCache, signedSearchRequest, signedMetadataRequest, parseSearchInteger, requestJson, playbackRequest, shortplayRequest, SEARCH_API, SEARCH_UA };
+module.exports = { fetchAppPlayUrl, clearEntryCache, signedSearchRequest, signedMetadataRequest, parseSearchInteger, requestJson, SEARCH_API, SEARCH_UA };
