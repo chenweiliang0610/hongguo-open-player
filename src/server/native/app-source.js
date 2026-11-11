@@ -502,45 +502,75 @@ async function fetchAppPlayUrl(vid, options = {}) {
         signal.throwIfAborted();
         if (err.code === 'EMPTY_RESPONSE') {
             logger.warn('AppSource', '播放接口返回空响应，尝试备用接口重试...');
+            signed = playbackRequest(payload, device, VIDEO_API_FALLBACK);
             try {
-                signed = playbackRequest(payload, device, VIDEO_API_FALLBACK);
                 response = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
             } catch (fallbackErr) {
                 signal.throwIfAborted();
-                // 异构备用接口：尝试番茄小说客户端短剧接口 (aid: 1967)
-                try {
-                    logger.warn('AppSource', '红果接口受阻，降级至番茄小说短剧备用通道...');
-                    const shortSigned = shortplayRequest(vid, device);
-                    const shortResp = await execRequestJson(shortSigned.url, { method: 'POST', headers: shortSigned.headers, data: shortSigned.body }, deadline, signal);
-                    const entry = shortResp?.data?.[vid] || (shortResp?.data?.video_model ? shortResp.data : null);
-                    if (entry) {
-                        response = { code: 0, data: { [vid]: entry } };
-                    } else {
-                        throw fallbackErr;
-                    }
-                } catch (_) {
-                    if (fallbackErr.code === 'EMPTY_RESPONSE' && typeof getPlaybackDevice.fallbackToDefault === 'function' && DEFAULT_VERIFIED_DEVICE && device?.device_id !== DEFAULT_VERIFIED_DEVICE.device_id) {
-                        logger.warn('AppSource', '播放接口主备通道均返回空响应，自动切换至基准设备重试...');
-                        const fallbackDevice = getPlaybackDevice.fallbackToDefault();
-                        signed = playbackRequest(payload, fallbackDevice, VIDEO_API);
-                        try {
-                            response = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
-                        } catch (retryErr) {
-                            signal.throwIfAborted();
-                            if (retryErr.code === 'EMPTY_RESPONSE') {
-                                signed = playbackRequest(payload, fallbackDevice, VIDEO_API_FALLBACK);
+                if (fallbackErr.code === 'EMPTY_RESPONSE' && typeof getPlaybackDevice.fallbackToDefault === 'function' && DEFAULT_VERIFIED_DEVICE && device?.device_id !== DEFAULT_VERIFIED_DEVICE.device_id) {
+                    logger.warn('AppSource', '播放接口主备通道均返回空响应，自动切换至基准设备重试...');
+                    const fallbackDevice = getPlaybackDevice.fallbackToDefault();
+                    signed = playbackRequest(payload, fallbackDevice, VIDEO_API);
+                    try {
+                        response = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
+                    } catch (retryErr) {
+                        signal.throwIfAborted();
+                        if (retryErr.code === 'EMPTY_RESPONSE') {
+                            signed = playbackRequest(payload, fallbackDevice, VIDEO_API_FALLBACK);
+                            try {
                                 response = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
-                            } else {
-                                throw retryErr;
+                            } catch (secondFallbackErr) {
+                                signal.throwIfAborted();
+                                // 终极降级：尝试番茄小说客户端短剧接口 (aid: 1967)
+                                try {
+                                    logger.warn('AppSource', '红果接口主备及基准设备均受阻，降级至番茄小说短剧备用通道...');
+                                    const shortSigned = shortplayRequest(vid, fallbackDevice);
+                                    const shortResp = await execRequestJson(shortSigned.url, { method: 'POST', headers: shortSigned.headers, data: shortSigned.body }, deadline, signal);
+                                    const entry = shortResp?.data?.[vid] || (shortResp?.data?.video_model ? shortResp.data : null);
+                                    if (entry) {
+                                        response = { code: 0, data: { [vid]: entry } };
+                                    } else {
+                                        throw secondFallbackErr;
+                                    }
+                                } catch (_) {
+                                    throw secondFallbackErr;
+                                }
                             }
+                        } else {
+                            throw retryErr;
                         }
-                    } else {
+                    }
+                } else {
+                    // 尝试番茄小说客户端短剧接口 (aid: 1967)
+                    try {
+                        logger.warn('AppSource', '红果接口受阻，降级至番茄小说短剧备用通道...');
+                        const shortSigned = shortplayRequest(vid, device);
+                        const shortResp = await execRequestJson(shortSigned.url, { method: 'POST', headers: shortSigned.headers, data: shortSigned.body }, deadline, signal);
+                        const entry = shortResp?.data?.[vid] || (shortResp?.data?.video_model ? shortResp.data : null);
+                        if (entry) {
+                            response = { code: 0, data: { [vid]: entry } };
+                        } else {
+                            throw fallbackErr;
+                        }
+                    } catch (_) {
                         throw fallbackErr;
                     }
                 }
             }
         } else {
-            throw err;
+            // 其他网络错误时，尝试番茄小说客户端短剧接口
+            try {
+                const shortSigned = shortplayRequest(vid, device);
+                const shortResp = await execRequestJson(shortSigned.url, { method: 'POST', headers: shortSigned.headers, data: shortSigned.body }, deadline, signal);
+                const entry = shortResp?.data?.[vid] || (shortResp?.data?.video_model ? shortResp.data : null);
+                if (entry) {
+                    response = { code: 0, data: { [vid]: entry } };
+                } else {
+                    throw err;
+                }
+            } catch (_) {
+                throw err;
+            }
         }
     }
     if (Number(response.Code || response.code || 0) !== 0) throw Object.assign(new Error('App 接口暂未提供本集播放信息'), { code: 'BUSINESS_REJECTED' });
