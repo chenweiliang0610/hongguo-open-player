@@ -199,7 +199,20 @@ function queryParam(query, name) {
   for (const part of query.split('&')) {
     const eq = part.indexOf('=');
     const k = eq < 0 ? part : part.substring(0, eq);
-    if (decodeURIComponent(k) === name) return decodeURIComponent(eq < 0 ? '' : part.substring(eq + 1));
+    let decodedK = k;
+    try {
+      decodedK = decodeURIComponent(k);
+    } catch {
+      decodedK = k;
+    }
+    if (decodedK === name) {
+      const v = eq < 0 ? '' : part.substring(eq + 1);
+      try {
+        return decodeURIComponent(v);
+      } catch {
+        return v;
+      }
+    }
   }
   return null;
 }

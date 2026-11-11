@@ -7,7 +7,7 @@
 // Crypto tables and SDK protocol constants below are not user credentials.
 const crypto = require('node:crypto');
 const logger = require('../services/logger');
-const { getPlaybackDevice } = require('./playback-device');
+const { getPlaybackDevice, DEFAULT_VERIFIED_DEVICE } = require('./playback-device');
 const sm3 = require('./sm3');
 const { PlayerSigner } = require('./argus');
 const { normalizeDownloadQuality, meetsDownloadQuality } = require('./download-quality');
@@ -138,17 +138,21 @@ function playbackRequest(payload, identity) {
     const query = pythonUrlEncode({ ...DEVICE, ...identity });
     const url = `${VIDEO_API}?${query}`;
     const signerHeaders = PlayerSigner.headers(query, body, khronos);
+    const headers = {
+        'User-Agent': VIDEO_UA,
+        Accept: 'application/json; charset=utf-8,application/x-protobuf',
+        'Content-Type': 'application/json',
+        'x-xs-from-web': '0',
+        'sdk-version': '2',
+        ...signerHeaders,
+    };
+    if (identity?.cookie) {
+        headers.Cookie = identity.cookie;
+    }
     return {
         url,
         body,
-        headers: {
-            'User-Agent': VIDEO_UA,
-            Accept: 'application/json; charset=utf-8,application/x-protobuf',
-            'Content-Type': 'application/json',
-            'x-xs-from-web': '0',
-            'sdk-version': '2',
-            ...signerHeaders,
-        }
+        headers,
     };
 }
 
@@ -178,14 +182,18 @@ function shortplayRequest(vid, identity) {
     });
     const body = Buffer.from(payload);
     const signerHeaders = PlayerSigner.headers(query, body, khronos);
+    const headers = {
+        'User-Agent': 'com.dragon.read',
+        'Content-Type': 'application/json; charset=utf-8',
+        ...signerHeaders,
+    };
+    if (identity?.cookie) {
+        headers.Cookie = identity.cookie;
+    }
     return {
         url,
         body,
-        headers: {
-            'User-Agent': 'com.dragon.read',
-            'Content-Type': 'application/json; charset=utf-8',
-            ...signerHeaders,
-        }
+        headers,
     };
 }
 
@@ -351,6 +359,14 @@ async function requestJson(url, options, deadline, signal) {
         }
         const parsed = typeof response.data === 'string' ? jsonBody(raw) : response.data;
         if (!parsed || typeof parsed !== 'object') throw Object.assign(new Error('App 接口未返回有效数据'), { code: 'INVALID_RESPONSE' });
+        if (response.headers) {
+            Object.defineProperty(parsed, '_headers', {
+                value: response.headers,
+                enumerable: false,
+                writable: true,
+                configurable: true,
+            });
+        }
         return parsed;
     }
     throw Object.assign(new Error('App 片源跳转次数过多'), { code: 'SECURITY_BLOCKED' });
@@ -478,6 +494,7 @@ async function fetchAppPlayUrl(vid, options = {}) {
     }
 
     const payload = JSON.stringify({
+        dr_scene: 'player',
         biz_param: { detail_page_version: 0, device_level: 3, disable_digg_stat: false, need_all_video_definition: true, need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024 },
         mixed_video_id_map: { '1004': batch },
     });
@@ -489,15 +506,20 @@ async function fetchAppPlayUrl(vid, options = {}) {
         response = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
     } catch (err) {
         signal.throwIfAborted();
-        if (err.code === 'EMPTY_RESPONSE' && typeof getPlaybackDevice.reset === 'function') {
+        if (err.code === 'EMPTY_RESPONSE') {
             logger.warn('AppSource', 'App 接口返回空响应，尝试更新播放设备并重试...');
-            getPlaybackDevice.reset(device);
-            const freshDevice = await getPlaybackDevice(execRequestJson, signal);
+            let freshDevice = device;
+            if (typeof getPlaybackDevice.fallbackToDefault === 'function' && DEFAULT_VERIFIED_DEVICE && device?.device_id !== DEFAULT_VERIFIED_DEVICE.device_id) {
+                freshDevice = getPlaybackDevice.fallbackToDefault();
+            } else if (typeof getPlaybackDevice.reset === 'function') {
+                getPlaybackDevice.reset(device);
+                freshDevice = await getPlaybackDevice(execRequestJson, signal);
+            }
             signed = playbackRequest(payload, freshDevice);
             try {
                 response = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
             } catch (retryErr) {
-                // 双模型回退：尝试 SHORTPLAY 接口
+                // 双模型回退：尝试 SHORTPLAY 备用接口
                 try {
                     const shortSigned = shortplayRequest(vid, freshDevice);
                     const shortResp = await execRequestJson(shortSigned.url, { method: 'POST', headers: shortSigned.headers, data: shortSigned.body }, deadline, signal);

@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const sm3 = require('../../src/server/native/sm3');
-const { Simon, Ladon, Argus, PlayerSigner } = require('../../src/server/native/argus');
+const { Simon, Ladon, Argus, PlayerSigner, queryParam } = require('../../src/server/native/argus');
 
 test('sm3 vector validation', () => {
   assert.equal(sm3(Buffer.alloc(0)).toString('hex'), '1ab21d8355cfa17f8e61194831e81a8f22bec8c728fefb747ed035eb5082aa2b');
@@ -45,4 +45,14 @@ test('playerSigner headers structure', () => {
   assert.ok(headers['x-ss-stub']);
   assert.ok(headers['x-ladon']);
   assert.ok(headers['x-argus']);
+});
+
+test('queryParam extracts values and tolerates malformed URI encoding', () => {
+  assert.equal(queryParam('foo=bar&baz=123', 'baz'), '123');
+  assert.equal(queryParam('foo=bar&baz=123', 'missing'), null);
+  assert.equal(queryParam('', 'foo'), null);
+  assert.equal(queryParam(null, 'foo'), null);
+  // Malformed percent encoding should not throw
+  assert.equal(queryParam('foo=%E0%A4%A&bar=test', 'bar'), 'test');
+  assert.equal(queryParam('bad=%99', 'bad'), '%99');
 });
