@@ -544,3 +544,57 @@ test('fetchAppPlayUrl remembers a working video_tab route and tries it first for
     getPlaybackDevice.reset();
   }
 });
+
+test('fetchAppPlayUrl enters a cooldown after every channel returns EMPTY_RESPONSE, and clears it on recovery', async () => {
+  const { getPlaybackDevice } = require('../../src/server/native/playback-device');
+  const originalRequest = appSource.requestJson;
+  appSource.clearEntryCache();
+  getPlaybackDevice.reset();
+  let upstreamCalls = 0;
+
+  appSource.requestJson = async (url) => {
+    if (url.includes('register')) {
+      return { code: 0, device_id_str: '999004', install_id_str: '888004' };
+    }
+    upstreamCalls++;
+    throw Object.assign(new Error('App upstream returned empty response'), { code: 'EMPTY_RESPONSE' });
+  };
+
+  try {
+    // First attempt walks the full ladder (POST + tab) and fails everywhere.
+    await assert.rejects(appSource.fetchAppPlayUrl('40011'), { code: 'EMPTY_RESPONSE' });
+    const fullLadderCalls = upstreamCalls;
+    assert.ok(fullLadderCalls > 10, 'the first attempt should try every channel');
+
+    // During the cooldown, repeated playback requests fail fast without
+    // touching the upstream — no retry storm while the server is blocking us.
+    upstreamCalls = 0;
+    for (let i = 0; i < 3; i += 1) {
+      await assert.rejects(appSource.fetchAppPlayUrl('40011', { refresh: true }), (err) =>
+        err.code === 'EMPTY_RESPONSE' && err.cooldown === true);
+    }
+    assert.equal(upstreamCalls, 0, 'cooldown must not hit the upstream');
+
+    // Recovery clears the cooldown: clearEntryCache resets it, and the next
+    // full ladder attempt succeeds through video_tab.
+    appSource.clearEntryCache();
+    upstreamCalls = 0;
+    appSource.requestJson = async (url) => {
+      if (url.includes('register')) {
+        return { code: 0, device_id_str: '999005', install_id_str: '888005' };
+      }
+      upstreamCalls++;
+      if (url.includes('video_tab')) {
+        return { code: 0, data: { video_model_data: { '40011': mockEntry('40011') } } };
+      }
+      throw Object.assign(new Error('App upstream returned empty response'), { code: 'EMPTY_RESPONSE' });
+    };
+    const play = await appSource.fetchAppPlayUrl('40011');
+    assert.equal(play.url, 'https://qznovelvod.com/video_40011.mp4');
+    assert.ok(upstreamCalls > 0, 'recovery attempt should reach the upstream again');
+  } finally {
+    appSource.requestJson = originalRequest;
+    appSource.clearEntryCache();
+    getPlaybackDevice.reset();
+  }
+});

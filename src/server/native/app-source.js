@@ -465,6 +465,14 @@ const inFlightEntryRequests = new Map();
 const SHORTPLAY_PREF_TTL_MS = 300000;
 const FRESH_DEVICE_SYNC_WINDOW_MS = 15000;
 const FRESH_DEVICE_RETRY_DELAY_MS = 1500;
+// When every playback route answers with an empty body the server is rate
+// limiting this network: retrying immediately only extends the block window
+// (observed 2026-11-20: a frontend refresh storm fired dozens of upstream
+// calls within two minutes). Fail fast instead, like hongguoTV's session
+// health handling, and let the caller retry after the cooldown.
+const PLAYBACK_CHANNEL_COOLDOWN_MS = 60000;
+let playbackChannelCooldownUntil = 0;
+let playbackChannelCooldownLoggedAt = 0;
 
 function clearEntryCache(vid) {
     if (vid) {
@@ -475,6 +483,7 @@ function clearEntryCache(vid) {
         entryCache.clear();
         preferredRouteByDevice.clear();
         inFlightEntryRequests.clear();
+        playbackChannelCooldownUntil = 0;
     }
 }
 
@@ -766,6 +775,15 @@ async function resolveUpstreamEntry(vid, batch, refresh, callerSignal) {
 
     const job = { controller, waiters: new Set(), promise: null };
     job.promise = (async () => {
+        const now = Date.now();
+        if (now < playbackChannelCooldownUntil) {
+            // Rate-limited log: a refresh storm hits this once per second, not once per call.
+            if (now - playbackChannelCooldownLoggedAt > 1000) {
+                playbackChannelCooldownLoggedAt = now;
+                logger.warn('AppSource', `播放通道处于冷却期（${Math.ceil((playbackChannelCooldownUntil - now) / 1000)}s），跳过本次上游取址`);
+            }
+            throw Object.assign(new Error('播放接口空响应冷却中，请稍后重试'), { code: 'EMPTY_RESPONSE', cooldown: true });
+        }
         const payload = JSON.stringify({
             biz_param: { detail_page_version: 0, device_level: 1, disable_digg_stat: false, disable_video_relate_book: false, need_all_video_definition: true, need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024 },
             mixed_video_id_map: { '1004': batch },
@@ -798,6 +816,13 @@ async function resolveUpstreamEntry(vid, batch, refresh, callerSignal) {
                 TAB_APIS.map(apiBase => ({ kind: 'tab', apiBase })),
                 vid, payload, device, execRequestJson, deadline, internalSignal);
         }
+
+        if (!result.response && result.allEmpty) {
+            playbackChannelCooldownUntil = Math.max(playbackChannelCooldownUntil, Date.now() + PLAYBACK_CHANNEL_COOLDOWN_MS);
+            logger.warn('AppSource', `全部播放通道（POST+video_tab）均返回空响应，进入 ${PLAYBACK_CHANNEL_COOLDOWN_MS / 1000}s 冷却期，避免加重服务端限流`);
+        }
+
+        if (result.response) playbackChannelCooldownUntil = 0;
 
         if (!result.response) {
             throw result.lastError || Object.assign(new Error('App 接口未返回所选分集，已停止取址'), { code: 'MISSING_MODEL' });
