@@ -468,3 +468,79 @@ test('fetchAppPlayUrl retries once after brief sync delay when a freshly registe
     getPlaybackDevice.reset();
   }
 });
+
+test('fetchAppPlayUrl falls back to the GET video_tab channel when every POST playback route returns EMPTY_RESPONSE', async () => {
+  const { getPlaybackDevice } = require('../../src/server/native/playback-device');
+  const originalRequest = appSource.requestJson;
+  appSource.clearEntryCache();
+  getPlaybackDevice.reset();
+  const calls = [];
+
+  appSource.requestJson = async (url) => {
+    if (url.includes('register')) {
+      return { code: 0, device_id_str: '999002', install_id_str: '888002' };
+    }
+    calls.push(url);
+    if (url.includes('video_tab')) {
+      return { code: 0, data: { video_model_data: { '40008': mockEntry('40008') } } };
+    }
+    throw Object.assign(new Error('App upstream returned empty response'), { code: 'EMPTY_RESPONSE' });
+  };
+
+  try {
+    const play = await appSource.fetchAppPlayUrl('40008');
+    assert.equal(play.url, 'https://qznovelvod.com/video_40008.mp4');
+    // First round (5 multi + 3 shortplay), fresh-device sync retry (4), then the tab ladder
+    assert.equal(calls.length, 13);
+    assert.ok(calls[12].includes('/reading/bookapi/video_tab/multi_video_model/v1/'));
+    assert.ok(calls[12].includes('device_id=999002'));
+    assert.ok(calls[12].includes('video_id=40008'));
+    assert.ok(calls[12].includes('version_code=73932'));
+  } finally {
+    appSource.requestJson = originalRequest;
+    appSource.clearEntryCache();
+    getPlaybackDevice.reset();
+  }
+});
+
+test('fetchAppPlayUrl remembers a working video_tab route and tries it first for the next episode', async () => {
+  const { getPlaybackDevice } = require('../../src/server/native/playback-device');
+  const originalRequest = appSource.requestJson;
+  appSource.clearEntryCache();
+  getPlaybackDevice.reset();
+  const calls = [];
+  let currentVid = '40009';
+  let tabUp = false;
+
+  appSource.requestJson = async (url) => {
+    if (url.includes('register')) {
+      return { code: 0, device_id_str: '999003', install_id_str: '888003' };
+    }
+    calls.push(url);
+    if (url.includes('video_tab')) {
+      tabUp = true;
+      return { code: 0, data: { video_model_data: { [currentVid]: mockEntry(currentVid) } } };
+    }
+    throw Object.assign(new Error('App upstream returned empty response'), { code: 'EMPTY_RESPONSE' });
+  };
+
+  try {
+    const first = await appSource.fetchAppPlayUrl('40009');
+    assert.equal(first.url, 'https://qznovelvod.com/video_40009.mp4');
+    assert.ok(tabUp, 'first episode should recover through the tab channel');
+    tabUp = false;
+
+    // The sticky tab route is tried first: no wasted POST ladder for the next episode.
+    calls.length = 0;
+    currentVid = '40010';
+    const second = await appSource.fetchAppPlayUrl('40010');
+    assert.equal(second.url, 'https://qznovelvod.com/video_40010.mp4');
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].includes('video_tab'));
+    assert.ok(tabUp);
+  } finally {
+    appSource.requestJson = originalRequest;
+    appSource.clearEntryCache();
+    getPlaybackDevice.reset();
+  }
+});

@@ -32,6 +32,13 @@ const SHORTPLAY_APIS = [
     'https://api5-normal-lq.fqnovel.com/novel/player/video_model/v1/',
     'https://reading.snssdk.com/novel/player/video_model/v1/',
 ];
+// hongguoTV 0.16.10 (#75): when every POST player route answers with an empty
+// body, the signed GET video_tab endpoint can still serve the playback model.
+const TAB_APIS = [
+    'https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/video_tab/multi_video_model/v1/',
+    'https://api5-normal-hl.fqnovel.com/reading/bookapi/video_tab/multi_video_model/v1/',
+    'https://api5-normal-lf.fqnovel.com/reading/bookapi/video_tab/multi_video_model/v1/',
+];
 const SEARCH_API = 'https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v';
 const VIDEO_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
 const PLAYBACK_UA = 'com.phoenix.read/74332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
@@ -208,6 +215,22 @@ function shortplayRequest(vid, identity, apiBase = SHORTPLAY_API) {
     };
     // Session cookies are added by requestJson after domain/path/expiry checks.
     return { url, body, headers };
+}
+
+// GET video_tab uses the same registered identity but the 7.3.9.32 playback
+// profile (hongguoTV playbackRequest), unlike the 7.4.3.32 multi POST above.
+function tabVideoModelRequest(vid, identity, apiBase = TAB_APIS[0]) {
+    const values = {
+        ...DEVICE,
+        version_code: '73932', version_name: '7.3.9.32', manifest_version_code: '73932',
+        update_version_code: '73932', pv_player: '73932',
+        device_id: identity?.device_id || '', iid: identity?.iid || '', cdid: identity?.cdid || '',
+        video_id: String(vid), video_id_type: '0', device_level: '1',
+        need_all_video_definition: '1', need_mp4_align: '0', use_os_player: '0',
+        video_platform: '1024', source: '0', from_video_id: '',
+    };
+    const { url, headers } = signPlaybackV5(apiBase, values, null);
+    return { url, headers: { 'User-Agent': VIDEO_UA, Accept: 'application/json', ...headers } };
 }
 
 function parseSearchInteger(value) {
@@ -587,7 +610,7 @@ function getPreferredRoute(devKey) {
 function setPreferredRoute(devKey, kind, apiBase) {
     if (!devKey || !apiBase) return;
     preferredRouteByDevice.delete(devKey);
-    preferredRouteByDevice.set(devKey, kind === 'shortplay'
+    preferredRouteByDevice.set(devKey, (kind === 'shortplay' || kind === 'tab')
         ? { kind, apiBase, expires: Date.now() + SHORTPLAY_PREF_TTL_MS }
         : { kind, apiBase });
     while (preferredRouteByDevice.size > 32) {
@@ -597,6 +620,14 @@ function setPreferredRoute(devKey, kind, apiBase) {
 
 function buildPlaybackSteps(devKey) {
     const pref = getPreferredRoute(devKey);
+    if (pref?.kind === 'tab') {
+        // The POST routes may still be blocked for this device; retry the working
+        // GET channel first, but keep the full POST ladder as the recovery path.
+        return [
+            { kind: 'tab', apiBase: pref.apiBase },
+            ...buildPlaybackSteps(null),
+        ];
+    }
     if (pref?.kind === 'shortplay') {
         const restShortplay = SHORTPLAY_APIS.filter(api => api !== pref.apiBase).map(apiBase => ({ kind: 'shortplay', apiBase }));
         const multiSteps = VIDEO_APIS.map(apiBase => ({ kind: 'multi', apiBase }));
@@ -640,7 +671,24 @@ async function runPlaybackSteps(steps, vid, payload, device, execRequestJson, de
         if (deadline - Date.now() <= 0) break;
 
         try {
-            if (step.kind === 'multi') {
+            if (step.kind === 'tab') {
+                const tabSigned = tabVideoModelRequest(vid, device, step.apiBase);
+                const tabResp = await execRequestJson(tabSigned.url, { method: 'GET', headers: tabSigned.headers }, deadline, signal);
+                if (Number(tabResp?.Code || tabResp?.code || 0) === 0) {
+                    const rows = tabResp?.data?.video_model_data || tabResp?.data;
+                    const row = rows?.[vid] || null;
+                    const model = typeof row?.video_model === 'string' ? jsonBody(row.video_model) : row?.video_model;
+                    // Strict like hongguoTV: the exact episode row is required and an
+                    // empty rendition list is not a usable fallback.
+                    if (model && !(Array.isArray(model.video_list) && model.video_list.length === 0)) {
+                        const resp = { code: 0, data: { [vid]: { ...row, video_model: model } } };
+                        cacheResponseEntries(resp);
+                        setPreferredRoute(devKey, 'tab', step.apiBase);
+                        return { response: resp, allEmpty: false };
+                    }
+                }
+                allEmpty = false;
+            } else if (step.kind === 'multi') {
                 const signed = playbackRequest(payload, device, step.apiBase);
                 const resp = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
                 if (Number(resp?.Code || resp?.code || 0) !== 0) {
@@ -742,6 +790,13 @@ async function resolveUpstreamEntry(vid, batch, refresh, callerSignal) {
                 { kind: 'shortplay', apiBase: 'https://api5-normal-lq.fqnovel.com/novel/player/video_model/v1/' },
             ];
             result = await runPlaybackSteps(retrySteps, vid, payload, device, execRequestJson, deadline, internalSignal);
+        }
+
+        if (!result.response && (result.allEmpty || result.lastError?.code === 'EMPTY_RESPONSE')) {
+            logger.warn('AppSource', '播放 POST 通道全部返回空响应，降级尝试 GET video_tab 备用通道...');
+            result = await runPlaybackSteps(
+                TAB_APIS.map(apiBase => ({ kind: 'tab', apiBase })),
+                vid, payload, device, execRequestJson, deadline, internalSignal);
         }
 
         if (!result.response) {
