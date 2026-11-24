@@ -4,7 +4,7 @@
 // (which are themselves ports of drpys 22261ad, GPL-3.0-only).
 // Crypto tables and SDK protocol constants below are not user credentials.
 //
-// Scope: ONLY the /novel/player/multi_video_model/player/v1 playback endpoint.
+// Scope: /novel/player/multi_video_model/preload/v1 and video_tab GET playback signing.
 // Search/catalogue endpoints keep the legacy v3 signer in app-source.js.
 const crypto = require('node:crypto');
 const sm3 = require('./sm3');
@@ -37,6 +37,9 @@ function upperHex(data) { return data.toString('hex').toUpperCase(); }
 // ---------- V5Constants.kt ----------
 const V5_MAGIC = Buffer.from('2d4b4fca49750d433fb5ae2c226dcc56', 'hex');
 const V5_LICENSE = '646637794';
+// Wire field 21 from verified 7.4.5.32 App/SDK requests (hongguoTV #107).
+// Same-request A/B: 377 returns HTTP 200/0B; 312 restores playback models.
+const V5_FIELD_21 = 312;
 const V5_SIGN_KEY = Buffer.from(
     'b23c2a470a20d105dc3f8c4438f8272ed46d6c89ffdcdedd5108698d26e9489d', 'hex');
 const V5_SBOX = Buffer.from(
@@ -76,7 +79,7 @@ function ivOf(query, body, ts) {
 }
 function branchV5(queryString, body, ts) {
     const query = sm3(Buffer.from(queryString));
-    const digest = body ? md5(body) : Buffer.alloc(16);
+    const digest = body != null ? md5(body) : Buffer.alloc(16);
     const low = ivOf(query, digest, ts) & 15;
     return low === 12 ? 0 : 1;
 }
@@ -211,7 +214,7 @@ class AesV3V5 {
 }
 
 // ---------- medusa v5 (Signer.kt medusaV5) ----------
-function rand() { return Math.floor(Math.random() * 0x100000000); }
+function rand(randomFn = Math.random) { return Math.floor(randomFn() * 0x100000000); }
 function xmxor(data, key) {
     const encoded = Buffer.alloc(data.length);
     for (let i = 0; i < data.length; i += 1) {
@@ -250,36 +253,42 @@ function keyHash(signKey, random) {
 const PROCESS_NONCE = crypto.randomBytes(18).toString('base64url');
 const PROCESS_STARTED = Date.now();
 
-function medusaV5(queryString, body, ts, values) {
+function medusaV5(queryString, body, ts, values, options = {}) {
+    const {
+        random = Math.random,
+        nonce: processNonce = PROCESS_NONCE,
+        started = PROCESS_STARTED,
+    } = options;
     const query = sm3(Buffer.from(queryString, 'utf8'));
-    const f13 = hashF13V5(query, body ? md5(body) : Buffer.alloc(16), ts);
+    const digest = body != null ? md5(body) : Buffer.alloc(16);
+    const f13 = hashF13V5(query, digest, ts);
     const flags = Buffer.alloc(8);
     const version = values.version_name;
     const deviceInfo = proto([
-        [1,1,'sint'],[2,2,'sint'],[3,'8662'],[4,values.device_id],[5,PROCESS_NONCE],
+        [1,1,'sint'],[2,2,'sint'],[3,'8662'],[4,values.device_id],[5,processNonce],
         [6,'!noperm!'],[12,'Asia/Shanghai,8'],[13,'zh_CN'],
-        [22,values.os_version],[25,PROCESS_STARTED,'sint'],
+        [22,values.os_version],[25,started,'sint'],
         [30,values.device_type],[31,'HONOR'],[32,values.device_type],[34,'HONOR'],
     ]);
     const env = proto([
         [6,'v04.10.03.04-bugfix'],[8,values.channel],[12,deviceInfo,'message'],[14,version],
     ]);
     const message = proto([
-        [1,V5_MAGIC,'bytes'],[2,5,'sint'],[3,u32(rand()),'sint'],[4,'8662'],
+        [1,V5_MAGIC,'bytes'],[2,5,'sint'],[3,u32(rand(random)),'sint'],[4,'8662'],
         [5,values.device_id],[6,V5_LICENSE],[7,version],[8,'v04.10.03-ml-android'],
         [9,0x040a0300,'sint'],[10,flags,'bytes'],[12,ts,'sint'],[13,f13,'bytes'],
         [14,query.subarray(0,6),'bytes'],
         [15,proto([[1,1,'sint'],[2,1,'sint'],[3,1,'sint'],[5,1,'sint']]),'message'],
-        [17,ts,'sint'],[20,'none'],[21,377,'sint'],[23,env,'message'],
+        [17,ts,'sint'],[20,'none'],[21,V5_FIELD_21,'sint'],[23,env,'message'],
         [24,'{"cmr":16777216,"cmr2":16777216,"un_h":11,"vpn":0,"kd":0,"dyn":"","do":1,"tk":true}'],
     ]);
-    const nonce = rand();
+    const nonce = rand(random);
     const [hash, seed] = keyHash(V5_SIGN_KEY, nonce);
     let transformed = Buffer.concat([flags, xmxor(message, hash)]).reverse();
     for (let i = 0; i < transformed.length; i += 1) transformed[i] ^= seed[(~i) & 3];
     const check = u32(0x18000001 | ((query[0] & 63) << 14) | ((f13[0] & 63) << 8));
     const packed = Buffer.concat([
-        Buffer.from([0xca]), le32(rand()), le32(check), transformed,
+        Buffer.from([0xca]), le32(rand(random)), le32(check), transformed,
         Buffer.from([(nonce >>> 16) & 255, (nonce >>> 24) & 255]),
     ]);
     const encrypted = new AesV3V5(md5(V5_SIGN_KEY.subarray(0, 16)), ts)
@@ -296,9 +305,10 @@ function medusaV5(queryString, body, ts, values) {
 
 // ---------- helios v5 (Signer.kt helios, mobileV5 license) ----------
 function ror64(value, count) { const n = BigInt(count) & 63n; const x = BigInt.asUintN(64, BigInt(value)); return BigInt.asUintN(64, (x >> n) | (x << (64n - n))); }
-function heliosV5(ts) {
-    const random = rand();
-    const digestText = md5(Buffer.concat([le32(random), Buffer.from('8662')])).toString('hex');
+function heliosV5(ts, options = {}) {
+    const { random = Math.random } = options;
+    const randomValue = rand(random);
+    const digestText = md5(Buffer.concat([le32(randomValue), Buffer.from('8662')])).toString('hex');
     const ascii = Buffer.from(digestText, 'ascii');
     const words = [];
     for (let i = 0; i < 4; i += 1) words.push(ascii.readBigUInt64LE(i * 8));
@@ -328,7 +338,7 @@ function heliosV5(ts) {
         block.writeBigUInt64LE(a); block.writeBigUInt64LE(b, 8);
         output.push(block);
     }
-    return Buffer.concat([le32(random), ...output]).toString('base64');
+    return Buffer.concat([le32(randomValue), ...output]).toString('base64');
 }
 
 // ---------- query encoding (Signer.kt encode): Java URLEncoder semantics ----------
@@ -345,7 +355,7 @@ function encodeValues(values) {
 // base: endpoint without query. values: fixed v5 query params incl. _rticket base.
 // body: gzip buffer. now: clock ms (default Date.now()).
 // returns { url, headers } where headers only contain v5 signing + body headers.
-function signPlaybackV5(base, values, body, now = Date.now()) {
+function signPlaybackV5(base, values, body, now = Date.now(), options = {}) {
     const ts = Math.floor(now / 1000);
     for (let offset = 0; offset < 1024; offset += 1) {
         const ticket = now + offset;
@@ -355,10 +365,10 @@ function signPlaybackV5(base, values, body, now = Date.now()) {
         const url = `${base}?${query}`;
         const headers = {
             'x-khronos': String(ts),
-            'x-helios': heliosV5(ts),
-            'x-medusa': medusaV5(url.substring(base.length + 1), body, ts, next),
+            'x-helios': heliosV5(ts, options),
+            'x-medusa': medusaV5(url.substring(base.length + 1), body, ts, next, options),
         };
-        if (body) {
+        if (body && body.length > 0) {
             headers['Content-Type'] = 'application/json; charset=utf-8';
             headers['x-ss-stub'] = upperHex(md5(body));
         }
@@ -369,5 +379,5 @@ function signPlaybackV5(base, values, body, now = Date.now()) {
 
 module.exports = {
     hashF13V5, branchV5, AesV3V5, medusaV5, heliosV5, signPlaybackV5, encodeValues,
-    V5_MAGIC, V5_LICENSE, V5_SIGN_KEY, V5_SBOX, HASH_TABLE,
+    V5_MAGIC, V5_LICENSE, V5_FIELD_21, V5_SIGN_KEY, V5_SBOX, HASH_TABLE,
 };

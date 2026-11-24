@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const { gunzipSync } = require('node:zlib');
 const { createHash } = require('node:crypto');
 const appSource = require('../../src/server/native/app-source');
+const { branchV5 } = require('../../src/server/native/v5-sign');
 
 function mockEntry(vid) {
   return {
@@ -99,12 +100,21 @@ test('fetchAppPlayUrl batches nextVids and caches returned models in entryCache'
     assert.ok(options.headers['x-helios']);
     assert.ok(options.headers['x-medusa']);
     assert.equal(options.headers['x-ss-stub'], createHash('md5').update(options.data).digest('hex').toUpperCase());
-    assert.equal(new URL(url).searchParams.get('aid'), '8662');
-    assert.equal(new URL(url).searchParams.get('version_name'), '7.4.3.32');
-    assert.equal(new URL(url).searchParams.get('device_type'), 'PGT-AN10');
-    assert.equal(new URL(url).searchParams.has('ts'), false);
-    assert.ok(options.headers['User-Agent'].includes('PGT-AN10'));
-    requests.push({ url, body: JSON.parse(gunzipSync(options.data)) });
+    const parsedUrl = new URL(url);
+    assert.equal(parsedUrl.pathname, '/novel/player/multi_video_model/preload/v1');
+    assert.equal(parsedUrl.searchParams.get('aid'), '8662');
+    assert.equal(parsedUrl.searchParams.get('version_code'), '74532');
+    assert.equal(parsedUrl.searchParams.get('version_name'), '7.4.5.32');
+    assert.equal(parsedUrl.searchParams.get('device_type'), '25053RT47C');
+    assert.equal(parsedUrl.searchParams.get('channel'), 'update_64');
+    assert.equal(parsedUrl.searchParams.get('os_version'), '16');
+    assert.equal(parsedUrl.searchParams.has('ts'), false);
+    assert.ok(options.headers['User-Agent'].includes('74532'));
+    assert.ok(options.headers['User-Agent'].includes('25053RT47C'));
+    const body = JSON.parse(gunzipSync(options.data));
+    assert.equal(body.dr_scene, 'preload');
+    assert.equal(body.biz_param.device_level, 1);
+    requests.push({ url, body });
     return {
       code: 0,
       data: {
@@ -476,11 +486,11 @@ test('fetchAppPlayUrl falls back to the GET video_tab channel when every POST pl
   getPlaybackDevice.reset();
   const calls = [];
 
-  appSource.requestJson = async (url) => {
+  appSource.requestJson = async (url, options) => {
     if (url.includes('register')) {
       return { code: 0, device_id_str: '999002', install_id_str: '888002' };
     }
-    calls.push(url);
+    calls.push({ url, options });
     if (url.includes('video_tab')) {
       return { code: 0, data: { video_model_data: { '40008': mockEntry('40008') } } };
     }
@@ -492,14 +502,58 @@ test('fetchAppPlayUrl falls back to the GET video_tab channel when every POST pl
     assert.equal(play.url, 'https://qznovelvod.com/video_40008.mp4');
     // First round (5 multi + 3 shortplay), fresh-device sync retry (4), then the tab ladder
     assert.equal(calls.length, 13);
-    assert.ok(calls[12].includes('/reading/bookapi/video_tab/multi_video_model/v1/'));
-    assert.ok(calls[12].includes('device_id=999002'));
-    assert.ok(calls[12].includes('video_id=40008'));
-    assert.ok(calls[12].includes('version_code=73932'));
+    const tabCall = calls[12];
+    const tabUrl = new URL(tabCall.url);
+    assert.ok(tabCall.url.includes('/reading/bookapi/video_tab/multi_video_model/v1/'));
+    assert.equal(tabUrl.searchParams.get('device_id'), '999002');
+    assert.equal(tabUrl.searchParams.get('video_id'), '40008');
+    assert.equal(tabUrl.searchParams.get('version_code'), '74532');
+    assert.equal(tabUrl.searchParams.get('device_type'), '25053RT47C');
+    assert.equal(tabCall.options.method, 'GET');
+    assert.ok(tabCall.options.headers['x-khronos']);
+    assert.ok(tabCall.options.headers['x-helios']);
+    assert.ok(tabCall.options.headers['x-medusa']);
+    assert.equal(tabCall.options.headers['x-ss-stub'], undefined);
+    assert.equal(tabCall.options.headers['Content-Type'], undefined);
+    assert.equal(tabCall.options.headers['Content-Encoding'], undefined);
+    assert.equal(
+      branchV5(tabUrl.search.slice(1), Buffer.alloc(0), Number(tabCall.options.headers['x-khronos'])),
+      0
+    );
   } finally {
     appSource.requestJson = originalRequest;
     appSource.clearEntryCache();
     getPlaybackDevice.reset();
+  }
+});
+
+test('fetchAppPlayUrl unpacks nested data["1004"] preload responses without selecting other episodes', async () => {
+  const originalRequest = appSource.requestJson;
+  appSource.clearEntryCache();
+
+  appSource.requestJson = async (url) => {
+    if (url.includes('register')) {
+      return { code: 0, device_id_str: '999', install_id_str: '888' };
+    }
+    return {
+      code: 0,
+      data: {
+        '1004': {
+          '40098': mockEntry('40098'),
+          '40099': mockEntry('40099'),
+        },
+      },
+    };
+  };
+
+  try {
+    const play = await appSource.fetchAppPlayUrl('40099');
+    assert.equal(play.url, 'https://qznovelvod.com/video_40099.mp4');
+    const cachedOther = await appSource.fetchAppPlayUrl('40098');
+    assert.equal(cachedOther.url, 'https://qznovelvod.com/video_40098.mp4');
+  } finally {
+    appSource.requestJson = originalRequest;
+    appSource.clearEntryCache();
   }
 });
 

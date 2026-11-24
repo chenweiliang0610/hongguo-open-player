@@ -17,14 +17,14 @@ const { normalizeDownloadQuality, meetsDownloadQuality } = require('./download-q
 const localId = () => String(1000000000000000n + BigInt('0x' + crypto.randomBytes(6).toString('hex')));
 const PROCESS_NONCE = crypto.randomBytes(18).toString('base64url');
 const PROCESS_STARTED = Date.now();
-const VIDEO_API = 'https://reading.snssdk.com/novel/player/multi_video_model/player/v1';
-const VIDEO_API_FALLBACK = 'https://api5-normal-sinfonlinea.fqnovel.com/novel/player/multi_video_model/player/v1';
+const VIDEO_API = 'https://reading.snssdk.com/novel/player/multi_video_model/preload/v1';
+const VIDEO_API_FALLBACK = 'https://api5-normal-sinfonlinea.fqnovel.com/novel/player/multi_video_model/preload/v1';
 const VIDEO_APIS = [
     VIDEO_API,
     VIDEO_API_FALLBACK,
-    'https://api5-normal-lq.fqnovel.com/novel/player/multi_video_model/player/v1',
-    'https://is.snssdk.com/novel/player/multi_video_model/player/v1',
-    'https://api5-normal-hl.fqnovel.com/novel/player/multi_video_model/player/v1',
+    'https://api5-normal-lq.fqnovel.com/novel/player/multi_video_model/preload/v1',
+    'https://is.snssdk.com/novel/player/multi_video_model/preload/v1',
+    'https://api5-normal-hl.fqnovel.com/novel/player/multi_video_model/preload/v1',
 ];
 const SHORTPLAY_API = 'https://api3-normal-sinfonlinea.fqnovel.com/novel/player/video_model/v1/';
 const SHORTPLAY_APIS = [
@@ -41,13 +41,18 @@ const TAB_APIS = [
 ];
 const SEARCH_API = 'https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v';
 const VIDEO_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
-const PLAYBACK_UA = 'com.phoenix.read/74332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
-// v5 playback uses the official 7.3.9.32 PGT-AN10 profile (see hongguoTV MobilePlayback.kt).
-const V5_PLAYBACK_UA = 'com.phoenix.read/73932 (Linux; U; Android 12; zh_CN_#Hans; PGT-AN10; Build/V417IR;tt-ok/3.12.13.20)';
+const PLAYBACK_UA = 'com.phoenix.read/74532 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
+// v5 playback uses the verified 7.4.5.32 Android 16 (25053RT47C) profile (see hongguoTV MobilePlayback.kt).
+const V5_PLAYBACK_UA = PLAYBACK_UA;
 const V5_PLAYBACK_QUERY = {
-    aid: '8662', app_name: 'novelread', version_code: '74332', version_name: '7.4.3.32',
-    channel: 'vivo_8662_64', device_platform: 'android', device_type: 'PGT-AN10',
-    os_version: '12', update_version_code: '74332',
+    aid: '8662', app_name: 'novelread',
+    version_code: '74532', version_name: '7.4.5.32',
+    update_version_code: '74532', manifest_version_code: '74532',
+    os: 'android', ssmix: 'a',
+    channel: 'update_64', device_platform: 'android',
+    device_type: '25053RT47C', device_brand: 'Redmi',
+    os_version: '16', os_api: '36',
+    ac: 'wifi', language: 'zh', host_abi: 'arm64-v8a',
 };
 const SEARCH_UA = 'com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)';
 const DEVICE = {
@@ -217,20 +222,26 @@ function shortplayRequest(vid, identity, apiBase = SHORTPLAY_API) {
     return { url, body, headers };
 }
 
-// GET video_tab uses the same registered identity but the 7.3.9.32 playback
-// profile (hongguoTV playbackRequest), unlike the 7.4.3.32 multi POST above.
+// GET video_tab uses the same registered identity and verified 7.4.5.32 playback profile.
 function tabVideoModelRequest(vid, identity, apiBase = TAB_APIS[0]) {
     const values = {
-        ...DEVICE,
-        version_code: '73932', version_name: '7.3.9.32', manifest_version_code: '73932',
-        update_version_code: '73932', pv_player: '73932',
-        device_id: identity?.device_id || '', iid: identity?.iid || '', cdid: identity?.cdid || '',
+        ...V5_PLAYBACK_QUERY,
+        iid: identity?.iid || '', cdid: identity?.cdid || '', device_id: identity?.device_id || '',
         video_id: String(vid), video_id_type: '0', device_level: '1',
         need_all_video_definition: '1', need_mp4_align: '0', use_os_player: '0',
         video_platform: '1024', source: '0', from_video_id: '',
     };
-    const { url, headers } = signPlaybackV5(apiBase, values, null);
-    return { url, headers: { 'User-Agent': VIDEO_UA, Accept: 'application/json', ...headers } };
+    // GET video_tab requires v5 signing over empty bytes MD5(""), not null (16 zero bytes).
+    const { url, headers } = signPlaybackV5(apiBase, values, Buffer.alloc(0));
+    return {
+        url,
+        headers: {
+            'User-Agent': V5_PLAYBACK_UA,
+            Accept: 'application/json; charset=utf-8',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            ...headers,
+        },
+    };
 }
 
 function parseSearchInteger(value) {
@@ -429,7 +440,7 @@ async function requestJson(url, options, deadline, signal) {
             logid, retry_after: String(response.headers?.['retry-after'] || '').slice(0, 64),
             content_type: String(response.headers?.['content-type'] || '').slice(0, 128),
             ...(diagnostics && target.pathname.includes('/player/')
-                ? { has_requested_video: Boolean(parsed?.data?.[diagnostics.vid] || parsed?.data?.video_model) } : {}), ...state,
+                ? { has_requested_video: Boolean(extractModelEntries(parsed?.data)?.[diagnostics.vid] || parsed?.data?.video_model) } : {}), ...state,
         });
         if ([301, 302, 303, 307, 308].includes(response.status)) {
             // Do not resend a signed body to a redirect destination.
@@ -651,10 +662,18 @@ function buildPlaybackSteps(devKey) {
     ];
 }
 
+function extractModelEntries(data) {
+    if (!data || typeof data !== 'object') return null;
+    return data['1004'] && typeof data['1004'] === 'object' && !Array.isArray(data['1004'])
+        ? data['1004']
+        : data;
+}
+
 function cacheResponseEntries(response) {
-    if (response?.data && typeof response.data === 'object') {
+    const entries = extractModelEntries(response?.data);
+    if (entries && typeof entries === 'object') {
         const now = Date.now();
-        for (const [id, entry] of Object.entries(response.data)) {
+        for (const [id, entry] of Object.entries(entries)) {
             if (entry && (entry.video_model || entry.fallback_api)) {
                 entryCache.set(id, { entry, expires: now + 180000 });
             }
@@ -704,7 +723,8 @@ async function runPlaybackSteps(steps, vid, payload, device, execRequestJson, de
                     throw Object.assign(new Error('App 接口暂未提供本集播放信息'), { code: 'BUSINESS_REJECTED' });
                 }
                 cacheResponseEntries(resp);
-                const hasEntry = Boolean(resp?.data?.[vid] || entryCache.get(vid)?.entry);
+                const entries = extractModelEntries(resp?.data);
+                const hasEntry = Boolean(entries?.[vid] || entryCache.get(vid)?.entry);
                 if (hasEntry) setPreferredRoute(devKey, 'multi', step.apiBase);
                 return { response: resp, allEmpty: false };
             }
@@ -787,7 +807,7 @@ async function resolveUpstreamEntry(vid, batch, refresh, callerSignal) {
         const payload = JSON.stringify({
             biz_param: { detail_page_version: 0, device_level: 1, disable_digg_stat: false, disable_video_relate_book: false, need_all_video_definition: true, need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024 },
             mixed_video_id_map: { '1004': batch },
-            dr_scene: 'player',
+            dr_scene: 'preload',
         });
         const playbackId = crypto.randomUUID();
         const execRequestJson = (url, requestOptions, ...args) => (module.exports.requestJson || requestJson)(url,
@@ -802,7 +822,7 @@ async function resolveUpstreamEntry(vid, batch, refresh, callerSignal) {
             logger.info('AppSource', `新设备刚完成注册可能仍在跨集群同步中，等待 ${FRESH_DEVICE_RETRY_DELAY_MS}ms 后重试播放通道...`);
             await sleepWithSignal(FRESH_DEVICE_RETRY_DELAY_MS, internalSignal);
             const retrySteps = [
-                { kind: 'multi', apiBase: 'https://api5-normal-lq.fqnovel.com/novel/player/multi_video_model/player/v1' },
+                { kind: 'multi', apiBase: 'https://api5-normal-lq.fqnovel.com/novel/player/multi_video_model/preload/v1' },
                 { kind: 'multi', apiBase: VIDEO_API },
                 { kind: 'shortplay', apiBase: SHORTPLAY_API },
                 { kind: 'shortplay', apiBase: 'https://api5-normal-lq.fqnovel.com/novel/player/video_model/v1/' },
@@ -827,7 +847,7 @@ async function resolveUpstreamEntry(vid, batch, refresh, callerSignal) {
         if (!result.response) {
             throw result.lastError || Object.assign(new Error('App 接口未返回所选分集，已停止取址'), { code: 'MISSING_MODEL' });
         }
-        const currentEntry = result.response.data?.[vid] || entryCache.get(vid)?.entry;
+        const currentEntry = extractModelEntries(result.response.data)?.[vid] || entryCache.get(vid)?.entry;
         if (!currentEntry) throw Object.assign(new Error('App 接口未返回所选分集，已停止取址'), { code: 'MISSING_MODEL' });
         return currentEntry;
     })().finally(() => {
