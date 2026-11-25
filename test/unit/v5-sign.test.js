@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const {
-    hashF13V5, AesV3V5, branchV5, signPlaybackV5, encodeValues,
+    hashF13V5, AesV3V5, branchV5, signPlaybackV5, encodeValues, formatDeviceToken,
 } = require('../../src/server/native/v5-sign');
 
 const hex = value => Buffer.from(value, 'hex');
@@ -62,8 +62,8 @@ test('v5 playback signing searches only _rticket and binds compressed body and i
     assert.ok(signed.headers['x-helios'].length > 20);
 });
 
-test('v5 playback signing matches verified field-21=312 wire contract byte-for-byte', () => {
-    const fixture = JSON.parse(fs.readFileSync(path.join(vectorsDir, 'signing-v5-playback-312.json'), 'utf8'));
+test('v5 playback signing matches verified envelope wire contract byte-for-byte', () => {
+    const fixture = JSON.parse(fs.readFileSync(path.join(vectorsDir, 'signing-v5-playback-envelope.json'), 'utf8'));
     const identity = {};
     for (const key of fixture.queryOrder) {
         identity[key] = fixture.identity[key];
@@ -79,6 +79,18 @@ test('v5 playback signing matches verified field-21=312 wire contract byte-for-b
     for (const [key, value] of Object.entries(fixture.headers)) {
         assert.equal(signed.headers[key], value, `header ${key} matches fixture`);
     }
+});
+
+test('formatDeviceToken pads short nonces to 25 chars starting with A and preserves conforming tokens', () => {
+    assert.equal(formatDeviceToken('synthetic'), 'AsyntheticAAAAAAAAAAAAAAA');
+    assert.equal(formatDeviceToken('synthetic').length, 25);
+    assert.equal(formatDeviceToken(''), 'AAAAAAAAAAAAAAAAAAAAAAAAA');
+    const valid = 'Abcdefghijklmnopqrstuvwxy';
+    assert.equal(valid.length, 25);
+    assert.equal(formatDeviceToken(valid), valid);
+    const overlong = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123';
+    assert.equal(formatDeviceToken(overlong), 'AABCDEFGHIJKLMNOPQRSTUVWX');
+    assert.equal(formatDeviceToken(overlong).length, 25);
 });
 
 test('v5 empty-body GET signing uses MD5 of empty bytes and omits POST headers', () => {

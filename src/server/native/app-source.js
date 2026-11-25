@@ -32,6 +32,9 @@ const SHORTPLAY_APIS = [
     'https://api5-normal-lq.fqnovel.com/novel/player/video_model/v1/',
     'https://reading.snssdk.com/novel/player/video_model/v1/',
 ];
+const V5_SINGLE_APIS = [
+    'https://reading.snssdk.com/novel/player/video_model/v1/',
+];
 // hongguoTV 0.16.10 (#75): when every POST player route answers with an empty
 // body, the signed GET video_tab endpoint can still serve the playback model.
 const TAB_APIS = [
@@ -185,6 +188,19 @@ function playbackRequest(payload, identity, apiBase = VIDEO_API) {
     };
     // The transport supplies cookies scoped to the destination from the active session.
     return { url, body, headers };
+}
+
+function singleVideoModelRequest(vid, identity, apiBase = V5_SINGLE_APIS[0]) {
+    const payload = JSON.stringify({
+        video_id: String(vid),
+        biz_param: {
+            detail_page_version: 0, device_level: 1, disable_digg_stat: false,
+            disable_video_relate_book: false, need_all_video_definition: true,
+            need_mp4_align: false, use_os_player: false, use_server_dns: false,
+            video_platform: 1024,
+        },
+    });
+    return playbackRequest(payload, identity, apiBase);
 }
 
 function shortplayRequest(vid, identity, apiBase = SHORTPLAY_API) {
@@ -630,7 +646,7 @@ function getPreferredRoute(devKey) {
 function setPreferredRoute(devKey, kind, apiBase) {
     if (!devKey || !apiBase) return;
     preferredRouteByDevice.delete(devKey);
-    preferredRouteByDevice.set(devKey, (kind === 'shortplay' || kind === 'tab')
+    preferredRouteByDevice.set(devKey, (kind === 'shortplay' || kind === 'tab' || kind === 'single')
         ? { kind, apiBase, expires: Date.now() + SHORTPLAY_PREF_TTL_MS }
         : { kind, apiBase });
     while (preferredRouteByDevice.size > 32) {
@@ -645,6 +661,12 @@ function buildPlaybackSteps(devKey) {
         // GET channel first, but keep the full POST ladder as the recovery path.
         return [
             { kind: 'tab', apiBase: pref.apiBase },
+            ...buildPlaybackSteps(null),
+        ];
+    }
+    if (pref?.kind === 'single') {
+        return [
+            { kind: 'single', apiBase: pref.apiBase },
             ...buildPlaybackSteps(null),
         ];
     }
@@ -716,6 +738,24 @@ async function runPlaybackSteps(steps, vid, payload, device, execRequestJson, de
                     }
                 }
                 allEmpty = false;
+            } else if (step.kind === 'single') {
+                const singleSigned = singleVideoModelRequest(vid, device, step.apiBase);
+                const singleResp = await execRequestJson(singleSigned.url, { method: 'POST', headers: singleSigned.headers, data: singleSigned.body }, deadline, signal);
+                if (Number(singleResp?.Code || singleResp?.code || 0) === 0) {
+                    const explicitId = singleResp?.data?.video_id;
+                    if (!explicitId || String(explicitId) === String(vid)) {
+                        const row = extractModelEntries(singleResp?.data)?.[vid]
+                            || (singleResp?.data?.video_model ? singleResp.data : null);
+                        const model = typeof row?.video_model === 'string' ? jsonBody(row.video_model) : row?.video_model;
+                        if (model && (!(Array.isArray(model.video_list) && model.video_list.length === 0) || model.fallback_api)) {
+                            const resp = { code: 0, data: { [vid]: { ...row, video_model: model } } };
+                            cacheResponseEntries(resp);
+                            setPreferredRoute(devKey, 'single', step.apiBase);
+                            return { response: resp, allEmpty: false };
+                        }
+                    }
+                }
+                allEmpty = false;
             } else if (step.kind === 'multi') {
                 const signed = playbackRequest(payload, device, step.apiBase);
                 const resp = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
@@ -727,18 +767,18 @@ async function runPlaybackSteps(steps, vid, payload, device, execRequestJson, de
                 const hasEntry = Boolean(entries?.[vid] || entryCache.get(vid)?.entry);
                 if (hasEntry) setPreferredRoute(devKey, 'multi', step.apiBase);
                 return { response: resp, allEmpty: false };
+            } else {
+                const shortSigned = shortplayRequest(vid, device, step.apiBase);
+                const shortResp = await execRequestJson(shortSigned.url, { method: 'POST', headers: shortSigned.headers, data: shortSigned.body }, deadline, signal);
+                const entry = shortResp?.data?.[vid] || (shortResp?.data?.video_model ? shortResp.data : null);
+                if (entry) {
+                    const resp = { code: 0, data: { [vid]: entry } };
+                    cacheResponseEntries(resp);
+                    setPreferredRoute(devKey, 'shortplay', step.apiBase);
+                    return { response: resp, allEmpty: false };
+                }
+                allEmpty = false;
             }
-
-            const shortSigned = shortplayRequest(vid, device, step.apiBase);
-            const shortResp = await execRequestJson(shortSigned.url, { method: 'POST', headers: shortSigned.headers, data: shortSigned.body }, deadline, signal);
-            const entry = shortResp?.data?.[vid] || (shortResp?.data?.video_model ? shortResp.data : null);
-            if (entry) {
-                const resp = { code: 0, data: { [vid]: entry } };
-                cacheResponseEntries(resp);
-                setPreferredRoute(devKey, 'shortplay', step.apiBase);
-                return { response: resp, allEmpty: false };
-            }
-            allEmpty = false;
         } catch (err) {
             signal.throwIfAborted();
             if (err.code === 'BUSINESS_REJECTED') throw err;
@@ -831,9 +871,12 @@ async function resolveUpstreamEntry(vid, batch, refresh, callerSignal) {
         }
 
         if (!result.response && (result.allEmpty || result.lastError?.code === 'EMPTY_RESPONSE')) {
-            logger.warn('AppSource', '播放 POST 通道全部返回空响应，降级尝试 GET video_tab 备用通道...');
+            logger.warn('AppSource', '播放 POST 通道全部返回空响应，降级尝试 v5 单集与 GET video_tab 备用通道...');
             result = await runPlaybackSteps(
-                TAB_APIS.map(apiBase => ({ kind: 'tab', apiBase })),
+                [
+                    ...V5_SINGLE_APIS.map(apiBase => ({ kind: 'single', apiBase })),
+                    ...TAB_APIS.map(apiBase => ({ kind: 'tab', apiBase })),
+                ],
                 vid, payload, device, execRequestJson, deadline, internalSignal);
         }
 
@@ -897,4 +940,4 @@ async function fetchAppPlayUrl(vid, options = {}) {
     return await parseEntryPlayInfo(vid, currentEntry, requestedQuality, allowLowerQuality, deadline, signal, options.allowBytevc2 === true, allowHevc, allowHevcTranscode);
 }
 
-module.exports = { fetchAppPlayUrl, clearEntryCache, isHevcCodec, signedSearchRequest, signedMetadataRequest, parseSearchInteger, requestJson, playbackRequest, shortplayRequest, SEARCH_API, SEARCH_UA };
+module.exports = { fetchAppPlayUrl, clearEntryCache, isHevcCodec, signedSearchRequest, signedMetadataRequest, parseSearchInteger, requestJson, playbackRequest, singleVideoModelRequest, shortplayRequest, SEARCH_API, SEARCH_UA };

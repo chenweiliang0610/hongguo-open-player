@@ -229,3 +229,72 @@ test('device API returns current device and supports manual reset to rotate devi
   const afterDevice = await afterRes.json();
   assert.equal(afterDevice.device_id, resetData.device.device_id);
 });
+
+test('device reset clears playback channel EMPTY_RESPONSE cooldown immediately', async t => {
+  const appSource = require('../../src/server/native/app-source');
+  const { getPlaybackDevice } = require('../../src/server/native/playback-device');
+  const originalRequest = appSource.requestJson;
+  appSource.clearEntryCache();
+  getPlaybackDevice.reset();
+  let registerSeq = 1;
+  let allowPlayback = false;
+  let playbackAttempts = 0;
+
+  appSource.requestJson = async (url) => {
+    if (url.includes('device_register')) {
+      const id = String(810000000000000 + registerSeq++);
+      const res = { device_id_str: id, install_id_str: id, code: 0 };
+      Object.defineProperty(res, '_headers', {
+        value: { 'set-cookie': [`install_id=${id}; Path=/`] },
+        enumerable: false
+      });
+      return res;
+    }
+    playbackAttempts++;
+    if (!allowPlayback) {
+      throw Object.assign(new Error('App upstream returned empty response'), { code: 'EMPTY_RESPONSE' });
+    }
+    return {
+      code: 0,
+      data: {
+        '40100': {
+          video_model: JSON.stringify({
+            video_list: [{
+              definition: '1080p',
+              codec_type: 'bytevc1',
+              main_url: 'https://qznovelvod.com/video_40100.mp4',
+              vwidth: 1080,
+              vheight: 1920,
+              encrypt_info: { encrypt: false }
+            }]
+          })
+        }
+      }
+    };
+  };
+  t.after(() => {
+    appSource.requestJson = originalRequest;
+    appSource.clearEntryCache();
+    getPlaybackDevice.reset();
+  });
+
+  const { server, port } = await startServer(0);
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const base = `http://127.0.0.1:${port}`;
+  const home = await fetch(base);
+  const cookie = home.headers.get('set-cookie').split(';')[0];
+  const options = { headers: { Cookie: cookie } };
+
+  await assert.rejects(appSource.fetchAppPlayUrl('40100'), { code: 'EMPTY_RESPONSE' });
+  playbackAttempts = 0;
+  await assert.rejects(appSource.fetchAppPlayUrl('40100'), err => err.code === 'EMPTY_RESPONSE' && err.cooldown === true);
+  assert.equal(playbackAttempts, 0, 'cooldown should skip upstream before device reset');
+
+  allowPlayback = true;
+  const resetRes = await fetch(`${base}/api/device/reset`, { method: 'POST', ...options });
+  assert.equal(resetRes.status, 200);
+
+  const play = await appSource.fetchAppPlayUrl('40100');
+  assert.equal(play.url, 'https://qznovelvod.com/video_40100.mp4');
+  assert.ok(playbackAttempts > 0, 'device reset should clear playback cooldown so upstream is queried');
+});

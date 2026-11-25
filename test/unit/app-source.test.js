@@ -500,9 +500,20 @@ test('fetchAppPlayUrl falls back to the GET video_tab channel when every POST pl
   try {
     const play = await appSource.fetchAppPlayUrl('40008');
     assert.equal(play.url, 'https://qznovelvod.com/video_40008.mp4');
-    // First round (5 multi + 3 shortplay), fresh-device sync retry (4), then the tab ladder
-    assert.equal(calls.length, 13);
-    const tabCall = calls[12];
+    // First round (5 multi + 3 shortplay), fresh-device sync retry (4), v5 single (1), then the tab ladder
+    assert.equal(calls.length, 14);
+    const singleCall = calls[12];
+    const singleUrl = new URL(singleCall.url);
+    assert.equal(singleUrl.hostname, 'reading.snssdk.com');
+    assert.equal(singleUrl.pathname, '/novel/player/video_model/v1/');
+    assert.equal(singleCall.options.method, 'POST');
+    assert.ok(singleCall.options.headers['x-medusa']);
+    assert.equal(singleCall.options.headers['Content-Encoding'], 'gzip');
+    const singleBody = JSON.parse(gunzipSync(singleCall.options.data));
+    assert.equal(singleBody.video_id, '40008');
+    assert.equal(singleBody.biz_param.device_level, 1);
+
+    const tabCall = calls[13];
     const tabUrl = new URL(tabCall.url);
     assert.ok(tabCall.url.includes('/reading/bookapi/video_tab/multi_video_model/v1/'));
     assert.equal(tabUrl.searchParams.get('device_id'), '999002');
@@ -646,6 +657,66 @@ test('fetchAppPlayUrl enters a cooldown after every channel returns EMPTY_RESPON
     const play = await appSource.fetchAppPlayUrl('40011');
     assert.equal(play.url, 'https://qznovelvod.com/video_40011.mp4');
     assert.ok(upstreamCalls > 0, 'recovery attempt should reach the upstream again');
+  } finally {
+    appSource.requestJson = originalRequest;
+    appSource.clearEntryCache();
+    getPlaybackDevice.reset();
+  }
+});
+
+test('fetchAppPlayUrl recovers via v5 single-episode video_model/v1, validates video_id, and remembers sticky single route', async () => {
+  const { getPlaybackDevice } = require('../../src/server/native/playback-device');
+  const originalRequest = appSource.requestJson;
+  appSource.clearEntryCache();
+  getPlaybackDevice.reset();
+  const calls = [];
+  let currentVid = '40012';
+  let mismatchSingle = false;
+
+  appSource.requestJson = async (url, options) => {
+    if (url.includes('register')) {
+      return { code: 0, device_id_str: '999006', install_id_str: '888006' };
+    }
+    calls.push({ url, options });
+    if (url.includes('/novel/player/video_model/v1/') && options.headers['x-medusa']) {
+      if (mismatchSingle) {
+        return { code: 0, data: { video_id: '999999', video_model: mockEntry('999999').video_model } };
+      }
+      return { code: 0, data: { video_model: mockEntry(currentVid).video_model } };
+    }
+    if (url.includes('video_tab')) {
+      return { code: 0, data: { video_model_data: { [currentVid]: mockEntry(currentVid) } } };
+    }
+    throw Object.assign(new Error('App upstream returned empty response'), { code: 'EMPTY_RESPONSE' });
+  };
+
+  try {
+    const first = await appSource.fetchAppPlayUrl('40012');
+    assert.equal(first.url, 'https://qznovelvod.com/video_40012.mp4');
+    // 5 multi + 3 shortplay + 4 fresh-device sync retry + 1 v5 single
+    assert.equal(calls.length, 13);
+    assert.ok(calls[12].url.includes('/novel/player/video_model/v1/'));
+    assert.ok(calls[12].options.headers['x-medusa']);
+
+    // Sticky single route should be tried first on the next episode without walking the failing ladder
+    calls.length = 0;
+    currentVid = '40013';
+    const second = await appSource.fetchAppPlayUrl('40013');
+    assert.equal(second.url, 'https://qznovelvod.com/video_40013.mp4');
+    assert.equal(calls.length, 1);
+    assert.ok(calls[0].url.includes('/novel/player/video_model/v1/'));
+    assert.ok(calls[0].options.headers['x-medusa']);
+
+    // Mismatched video_id from single-episode endpoint must be rejected and fall through to video_tab
+    calls.length = 0;
+    currentVid = '40014';
+    mismatchSingle = true;
+    const third = await appSource.fetchAppPlayUrl('40014');
+    assert.equal(third.url, 'https://qznovelvod.com/video_40014.mp4');
+    assert.ok(calls[0].url.includes('/novel/player/video_model/v1/'));
+    assert.ok(calls.some(call => call.url.includes('video_tab')), 'mismatched single response should fall through to video_tab');
+    assert.ok(!calls.some(call => call.url.includes('video_model/v1/') && !call.options.headers['x-medusa'] && calls.indexOf(call) === 1),
+      'rejected single step must not fall through directly into legacy shortplayRequest');
   } finally {
     appSource.requestJson = originalRequest;
     appSource.clearEntryCache();

@@ -250,6 +250,13 @@ function keyHash(signKey, random) {
     return [hash, le32(d2)];
 }
 
+function formatDeviceToken(processNonce) {
+    if (typeof processNonce === 'string' && processNonce.length === 25 && processNonce.startsWith('A')) {
+        return processNonce;
+    }
+    return 'A' + `${processNonce || ''}AAAAAAAAAAAAAAAAAAAAAAAA`.slice(0, 24);
+}
+
 const PROCESS_NONCE = crypto.randomBytes(18).toString('base64url');
 const PROCESS_STARTED = Date.now();
 
@@ -258,27 +265,43 @@ function medusaV5(queryString, body, ts, values, options = {}) {
         random = Math.random,
         nonce: processNonce = PROCESS_NONCE,
         started = PROCESS_STARTED,
+        now = Date.now(),
     } = options;
     const query = sm3(Buffer.from(queryString, 'utf8'));
     const digest = body != null ? md5(body) : Buffer.alloc(16);
     const f13 = hashF13V5(query, digest, ts);
-    const flags = Buffer.alloc(8);
+    const flags = Buffer.from('4480000000000000', 'hex');
     const version = values.version_name;
+    const brand = values.device_brand || 'HONOR';
+    const type = values.device_type;
+    const deviceToken = formatDeviceToken(processNonce);
+    const envLaunch = Math.floor(random() * 21) + 100;
+    const envPid = Math.floor(random() * 2000) + 10001;
     const deviceInfo = proto([
-        [1,1,'sint'],[2,2,'sint'],[3,'8662'],[4,values.device_id],[5,processNonce],
-        [6,'!noperm!'],[12,'Asia/Shanghai,8'],[13,'zh_CN'],
-        [22,values.os_version],[25,started,'sint'],
-        [30,values.device_type],[31,'HONOR'],[32,values.device_type],[34,'HONOR'],
+        [1,1,'sint'],[2,2,'sint'],[3,'8662'],[4,values.device_id],
+        [5,deviceToken],[6,'!noperm!'],
+        [7,-888888,'sint'],[8,-888888,'sint'],[9,3,'sint'],[10,-888888,'sint'],
+        [11,'!notset!'],[12,'Asia/Shanghai,8'],[13,'zh_CN'],[14,4,'sint'],
+        [16,0,'float'],[17,0,'float'],[18,0,'float'],[19,0,'float'],[20,0,'float'],[21,0,'float'],
+        [22,values.os_version],[23,41,'sint'],[24,36,'sint'],
+        [25,started,'sint'],[26,started,'sint'],[27,started,'sint'],[28,now,'sint'],
+        [29,-1,'sint'],[30,type],[31,brand],[32,type],[33,type],
+        [34,brand],[35,brand],[36,brand],[38,31,'sint'],
     ]);
     const env = proto([
-        [6,'v04.10.03.04-bugfix'],[8,values.channel],[12,deviceInfo,'message'],[14,version],
+        [1,envLaunch,'sint'],[2,247235599,'sint'],[3,247235596,'sint'],
+        [5,7,'sint'],[6,'v04.10.03.04-bugfix'],[7,envPid,'sint'],
+        [8,values.channel],[12,deviceInfo,'message'],
+        [13,proto([[1,ts,'sint'],[2,-2,'sint'],[4,200,'sint']]),'message'],
+        [14,version],
     ]);
     const message = proto([
         [1,V5_MAGIC,'bytes'],[2,5,'sint'],[3,u32(rand(random)),'sint'],[4,'8662'],
         [5,values.device_id],[6,V5_LICENSE],[7,version],[8,'v04.10.03-ml-android'],
         [9,0x040a0300,'sint'],[10,flags,'bytes'],[12,ts,'sint'],[13,f13,'bytes'],
         [14,query.subarray(0,6),'bytes'],
-        [15,proto([[1,1,'sint'],[2,1,'sint'],[3,1,'sint'],[5,1,'sint']]),'message'],
+        [15,proto([[1,305,'sint'],[2,4,'sint'],[3,694367,'sint'],[5,1621072674,'sint']]),'message'],
+        [16,deviceToken],
         [17,ts,'sint'],[20,'none'],[21,V5_FIELD_21,'sint'],[23,env,'message'],
         [24,'{"cmr":16777216,"cmr2":16777216,"un_h":11,"vpn":0,"kd":0,"dyn":"","do":1,"tk":true}'],
     ]);
@@ -366,7 +389,7 @@ function signPlaybackV5(base, values, body, now = Date.now(), options = {}) {
         const headers = {
             'x-khronos': String(ts),
             'x-helios': heliosV5(ts, options),
-            'x-medusa': medusaV5(url.substring(base.length + 1), body, ts, next, options),
+            'x-medusa': medusaV5(url.substring(base.length + 1), body, ts, next, { ...options, now: options.now ?? now }),
         };
         if (body && body.length > 0) {
             headers['Content-Type'] = 'application/json; charset=utf-8';
@@ -378,6 +401,6 @@ function signPlaybackV5(base, values, body, now = Date.now(), options = {}) {
 }
 
 module.exports = {
-    hashF13V5, branchV5, AesV3V5, medusaV5, heliosV5, signPlaybackV5, encodeValues,
+    hashF13V5, branchV5, AesV3V5, medusaV5, heliosV5, signPlaybackV5, encodeValues, formatDeviceToken,
     V5_MAGIC, V5_LICENSE, V5_FIELD_21, V5_SIGN_KEY, V5_SBOX, HASH_TABLE,
 };

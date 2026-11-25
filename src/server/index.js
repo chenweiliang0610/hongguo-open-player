@@ -124,10 +124,11 @@ app.get('/api/device', async (_req, res) => {
 app.post('/api/device/reset', async (_req, res) => {
   try {
     const { getPlaybackDevice } = require('./native/playback-device');
-    const { requestJson } = require('./native/app-source');
+    const { requestJson, clearEntryCache } = require('./native/app-source');
     const danmakuService = require('./native/danmaku');
     logger.info('Device', '收到用户主动更换设备指令，开始注册全新的独立匿名设备...');
     const newDevice = await getPlaybackDevice.rotateDevice(requestJson);
+    clearEntryCache();
     danmakuService.resetDanmakuCache();
     logger.info('Device', `新设备生成成功: device_id=${newDevice.device_id}, iid=${newDevice.iid}`);
     res.set('Cache-Control', 'no-store');
