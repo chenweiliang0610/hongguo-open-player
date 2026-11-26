@@ -17,14 +17,14 @@ const { normalizeDownloadQuality, meetsDownloadQuality } = require('./download-q
 const localId = () => String(1000000000000000n + BigInt('0x' + crypto.randomBytes(6).toString('hex')));
 const PROCESS_NONCE = crypto.randomBytes(18).toString('base64url');
 const PROCESS_STARTED = Date.now();
-const VIDEO_API = 'https://reading.snssdk.com/novel/player/multi_video_model/player/v1';
-const VIDEO_API_FALLBACK = 'https://api5-normal-sinfonlinea.fqnovel.com/novel/player/multi_video_model/player/v1';
+const VIDEO_API = 'https://reading.snssdk.com/novel/player/multi_video_model/preload/v1';
+const VIDEO_API_FALLBACK = 'https://api5-normal-sinfonlinea.fqnovel.com/novel/player/multi_video_model/preload/v1';
 const VIDEO_APIS = [
     VIDEO_API,
     VIDEO_API_FALLBACK,
-    'https://api5-normal-lq.fqnovel.com/novel/player/multi_video_model/player/v1',
-    'https://is.snssdk.com/novel/player/multi_video_model/player/v1',
-    'https://api5-normal-hl.fqnovel.com/novel/player/multi_video_model/player/v1',
+    'https://api5-normal-lq.fqnovel.com/novel/player/multi_video_model/preload/v1',
+    'https://is.snssdk.com/novel/player/multi_video_model/preload/v1',
+    'https://api5-normal-hl.fqnovel.com/novel/player/multi_video_model/preload/v1',
 ];
 const SHORTPLAY_API = 'https://api3-normal-sinfonlinea.fqnovel.com/novel/player/video_model/v1/';
 const SHORTPLAY_APIS = [
@@ -32,15 +32,30 @@ const SHORTPLAY_APIS = [
     'https://api5-normal-lq.fqnovel.com/novel/player/video_model/v1/',
     'https://reading.snssdk.com/novel/player/video_model/v1/',
 ];
+const V5_SINGLE_APIS = [
+    'https://reading.snssdk.com/novel/player/video_model/v1/',
+];
+// hongguoTV 0.16.10 (#75): when every POST player route answers with an empty
+// body, the signed GET video_tab endpoint can still serve the playback model.
+const TAB_APIS = [
+    'https://api5-normal-sinfonlineb.fqnovel.com/reading/bookapi/video_tab/multi_video_model/v1/',
+    'https://api5-normal-hl.fqnovel.com/reading/bookapi/video_tab/multi_video_model/v1/',
+    'https://api5-normal-lf.fqnovel.com/reading/bookapi/video_tab/multi_video_model/v1/',
+];
 const SEARCH_API = 'https://api5-normal-sinfonlinea.fqnovel.com/reading/bookapi/search/tab/v';
 const VIDEO_UA = 'com.phoenix.read/71332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
-const PLAYBACK_UA = 'com.phoenix.read/74332 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
-// v5 playback uses the official 7.3.9.32 PGT-AN10 profile (see hongguoTV MobilePlayback.kt).
-const V5_PLAYBACK_UA = 'com.phoenix.read/73932 (Linux; U; Android 12; zh_CN_#Hans; PGT-AN10; Build/V417IR;tt-ok/3.12.13.20)';
+const PLAYBACK_UA = 'com.phoenix.read/74532 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3; Cronet/TTNetVersion:04657795 2026-01-23 QuicVersion:c67e9834 2025-09-08)';
+// v5 playback uses the verified 7.4.5.32 Android 16 (25053RT47C) profile (see hongguoTV MobilePlayback.kt).
+const V5_PLAYBACK_UA = PLAYBACK_UA;
 const V5_PLAYBACK_QUERY = {
-    aid: '8662', app_name: 'novelread', version_code: '74332', version_name: '7.4.3.32',
-    channel: 'vivo_8662_64', device_platform: 'android', device_type: 'PGT-AN10',
-    os_version: '12', update_version_code: '74332',
+    aid: '8662', app_name: 'novelread',
+    version_code: '74532', version_name: '7.4.5.32',
+    update_version_code: '74532', manifest_version_code: '74532',
+    os: 'android', ssmix: 'a',
+    channel: 'update_64', device_platform: 'android',
+    device_type: '25053RT47C', device_brand: 'Redmi',
+    os_version: '16', os_api: '36',
+    ac: 'wifi', language: 'zh', host_abi: 'arm64-v8a',
 };
 const SEARCH_UA = 'com.phoenix.read/72232 (Linux; U; Android 16; zh_CN; 25053RT47C; Build/BP2A.250605.031.A3)';
 const DEVICE = {
@@ -175,6 +190,19 @@ function playbackRequest(payload, identity, apiBase = VIDEO_API) {
     return { url, body, headers };
 }
 
+function singleVideoModelRequest(vid, identity, apiBase = V5_SINGLE_APIS[0]) {
+    const payload = JSON.stringify({
+        video_id: String(vid),
+        biz_param: {
+            detail_page_version: 0, device_level: 1, disable_digg_stat: false,
+            disable_video_relate_book: false, need_all_video_definition: true,
+            need_mp4_align: false, use_os_player: false, use_server_dns: false,
+            video_platform: 1024,
+        },
+    });
+    return playbackRequest(payload, identity, apiBase);
+}
+
 function shortplayRequest(vid, identity, apiBase = SHORTPLAY_API) {
     const khronos = Math.floor(Date.now() / 1000);
     const query = pythonUrlEncode({
@@ -208,6 +236,28 @@ function shortplayRequest(vid, identity, apiBase = SHORTPLAY_API) {
     };
     // Session cookies are added by requestJson after domain/path/expiry checks.
     return { url, body, headers };
+}
+
+// GET video_tab uses the same registered identity and verified 7.4.5.32 playback profile.
+function tabVideoModelRequest(vid, identity, apiBase = TAB_APIS[0]) {
+    const values = {
+        ...V5_PLAYBACK_QUERY,
+        iid: identity?.iid || '', cdid: identity?.cdid || '', device_id: identity?.device_id || '',
+        video_id: String(vid), video_id_type: '0', device_level: '1',
+        need_all_video_definition: '1', need_mp4_align: '0', use_os_player: '0',
+        video_platform: '1024', source: '0', from_video_id: '',
+    };
+    // GET video_tab requires v5 signing over empty bytes MD5(""), not null (16 zero bytes).
+    const { url, headers } = signPlaybackV5(apiBase, values, Buffer.alloc(0));
+    return {
+        url,
+        headers: {
+            'User-Agent': V5_PLAYBACK_UA,
+            Accept: 'application/json; charset=utf-8',
+            'Accept-Language': 'zh-CN,zh;q=0.9',
+            ...headers,
+        },
+    };
 }
 
 function parseSearchInteger(value) {
@@ -406,7 +456,7 @@ async function requestJson(url, options, deadline, signal) {
             logid, retry_after: String(response.headers?.['retry-after'] || '').slice(0, 64),
             content_type: String(response.headers?.['content-type'] || '').slice(0, 128),
             ...(diagnostics && target.pathname.includes('/player/')
-                ? { has_requested_video: Boolean(parsed?.data?.[diagnostics.vid] || parsed?.data?.video_model) } : {}), ...state,
+                ? { has_requested_video: Boolean(extractModelEntries(parsed?.data)?.[diagnostics.vid] || parsed?.data?.video_model) } : {}), ...state,
         });
         if ([301, 302, 303, 307, 308].includes(response.status)) {
             // Do not resend a signed body to a redirect destination.
@@ -442,6 +492,14 @@ const inFlightEntryRequests = new Map();
 const SHORTPLAY_PREF_TTL_MS = 300000;
 const FRESH_DEVICE_SYNC_WINDOW_MS = 15000;
 const FRESH_DEVICE_RETRY_DELAY_MS = 1500;
+// When every playback route answers with an empty body the server is rate
+// limiting this network: retrying immediately only extends the block window
+// (observed 2026-11-20: a frontend refresh storm fired dozens of upstream
+// calls within two minutes). Fail fast instead, like hongguoTV's session
+// health handling, and let the caller retry after the cooldown.
+const PLAYBACK_CHANNEL_COOLDOWN_MS = 60000;
+let playbackChannelCooldownUntil = 0;
+let playbackChannelCooldownLoggedAt = 0;
 
 function clearEntryCache(vid) {
     if (vid) {
@@ -452,6 +510,7 @@ function clearEntryCache(vid) {
         entryCache.clear();
         preferredRouteByDevice.clear();
         inFlightEntryRequests.clear();
+        playbackChannelCooldownUntil = 0;
     }
 }
 
@@ -587,7 +646,7 @@ function getPreferredRoute(devKey) {
 function setPreferredRoute(devKey, kind, apiBase) {
     if (!devKey || !apiBase) return;
     preferredRouteByDevice.delete(devKey);
-    preferredRouteByDevice.set(devKey, kind === 'shortplay'
+    preferredRouteByDevice.set(devKey, (kind === 'shortplay' || kind === 'tab' || kind === 'single')
         ? { kind, apiBase, expires: Date.now() + SHORTPLAY_PREF_TTL_MS }
         : { kind, apiBase });
     while (preferredRouteByDevice.size > 32) {
@@ -597,6 +656,20 @@ function setPreferredRoute(devKey, kind, apiBase) {
 
 function buildPlaybackSteps(devKey) {
     const pref = getPreferredRoute(devKey);
+    if (pref?.kind === 'tab') {
+        // The POST routes may still be blocked for this device; retry the working
+        // GET channel first, but keep the full POST ladder as the recovery path.
+        return [
+            { kind: 'tab', apiBase: pref.apiBase },
+            ...buildPlaybackSteps(null),
+        ];
+    }
+    if (pref?.kind === 'single') {
+        return [
+            { kind: 'single', apiBase: pref.apiBase },
+            ...buildPlaybackSteps(null),
+        ];
+    }
     if (pref?.kind === 'shortplay') {
         const restShortplay = SHORTPLAY_APIS.filter(api => api !== pref.apiBase).map(apiBase => ({ kind: 'shortplay', apiBase }));
         const multiSteps = VIDEO_APIS.map(apiBase => ({ kind: 'multi', apiBase }));
@@ -611,10 +684,18 @@ function buildPlaybackSteps(devKey) {
     ];
 }
 
+function extractModelEntries(data) {
+    if (!data || typeof data !== 'object') return null;
+    return data['1004'] && typeof data['1004'] === 'object' && !Array.isArray(data['1004'])
+        ? data['1004']
+        : data;
+}
+
 function cacheResponseEntries(response) {
-    if (response?.data && typeof response.data === 'object') {
+    const entries = extractModelEntries(response?.data);
+    if (entries && typeof entries === 'object') {
         const now = Date.now();
-        for (const [id, entry] of Object.entries(response.data)) {
+        for (const [id, entry] of Object.entries(entries)) {
             if (entry && (entry.video_model || entry.fallback_api)) {
                 entryCache.set(id, { entry, expires: now + 180000 });
             }
@@ -640,28 +721,64 @@ async function runPlaybackSteps(steps, vid, payload, device, execRequestJson, de
         if (deadline - Date.now() <= 0) break;
 
         try {
-            if (step.kind === 'multi') {
+            if (step.kind === 'tab') {
+                const tabSigned = tabVideoModelRequest(vid, device, step.apiBase);
+                const tabResp = await execRequestJson(tabSigned.url, { method: 'GET', headers: tabSigned.headers }, deadline, signal);
+                if (Number(tabResp?.Code || tabResp?.code || 0) === 0) {
+                    const rows = tabResp?.data?.video_model_data || tabResp?.data;
+                    const row = rows?.[vid] || null;
+                    const model = typeof row?.video_model === 'string' ? jsonBody(row.video_model) : row?.video_model;
+                    // Strict like hongguoTV: the exact episode row is required and an
+                    // empty rendition list is not a usable fallback.
+                    if (model && !(Array.isArray(model.video_list) && model.video_list.length === 0)) {
+                        const resp = { code: 0, data: { [vid]: { ...row, video_model: model } } };
+                        cacheResponseEntries(resp);
+                        setPreferredRoute(devKey, 'tab', step.apiBase);
+                        return { response: resp, allEmpty: false };
+                    }
+                }
+                allEmpty = false;
+            } else if (step.kind === 'single') {
+                const singleSigned = singleVideoModelRequest(vid, device, step.apiBase);
+                const singleResp = await execRequestJson(singleSigned.url, { method: 'POST', headers: singleSigned.headers, data: singleSigned.body }, deadline, signal);
+                if (Number(singleResp?.Code || singleResp?.code || 0) === 0) {
+                    const explicitId = singleResp?.data?.video_id;
+                    if (!explicitId || String(explicitId) === String(vid)) {
+                        const row = extractModelEntries(singleResp?.data)?.[vid]
+                            || (singleResp?.data?.video_model ? singleResp.data : null);
+                        const model = typeof row?.video_model === 'string' ? jsonBody(row.video_model) : row?.video_model;
+                        if (model && (!(Array.isArray(model.video_list) && model.video_list.length === 0) || model.fallback_api)) {
+                            const resp = { code: 0, data: { [vid]: { ...row, video_model: model } } };
+                            cacheResponseEntries(resp);
+                            setPreferredRoute(devKey, 'single', step.apiBase);
+                            return { response: resp, allEmpty: false };
+                        }
+                    }
+                }
+                allEmpty = false;
+            } else if (step.kind === 'multi') {
                 const signed = playbackRequest(payload, device, step.apiBase);
                 const resp = await execRequestJson(signed.url, { method: 'POST', headers: signed.headers, data: signed.body }, deadline, signal);
                 if (Number(resp?.Code || resp?.code || 0) !== 0) {
                     throw Object.assign(new Error('App 接口暂未提供本集播放信息'), { code: 'BUSINESS_REJECTED' });
                 }
                 cacheResponseEntries(resp);
-                const hasEntry = Boolean(resp?.data?.[vid] || entryCache.get(vid)?.entry);
+                const entries = extractModelEntries(resp?.data);
+                const hasEntry = Boolean(entries?.[vid] || entryCache.get(vid)?.entry);
                 if (hasEntry) setPreferredRoute(devKey, 'multi', step.apiBase);
                 return { response: resp, allEmpty: false };
+            } else {
+                const shortSigned = shortplayRequest(vid, device, step.apiBase);
+                const shortResp = await execRequestJson(shortSigned.url, { method: 'POST', headers: shortSigned.headers, data: shortSigned.body }, deadline, signal);
+                const entry = shortResp?.data?.[vid] || (shortResp?.data?.video_model ? shortResp.data : null);
+                if (entry) {
+                    const resp = { code: 0, data: { [vid]: entry } };
+                    cacheResponseEntries(resp);
+                    setPreferredRoute(devKey, 'shortplay', step.apiBase);
+                    return { response: resp, allEmpty: false };
+                }
+                allEmpty = false;
             }
-
-            const shortSigned = shortplayRequest(vid, device, step.apiBase);
-            const shortResp = await execRequestJson(shortSigned.url, { method: 'POST', headers: shortSigned.headers, data: shortSigned.body }, deadline, signal);
-            const entry = shortResp?.data?.[vid] || (shortResp?.data?.video_model ? shortResp.data : null);
-            if (entry) {
-                const resp = { code: 0, data: { [vid]: entry } };
-                cacheResponseEntries(resp);
-                setPreferredRoute(devKey, 'shortplay', step.apiBase);
-                return { response: resp, allEmpty: false };
-            }
-            allEmpty = false;
         } catch (err) {
             signal.throwIfAborted();
             if (err.code === 'BUSINESS_REJECTED') throw err;
@@ -718,10 +835,19 @@ async function resolveUpstreamEntry(vid, batch, refresh, callerSignal) {
 
     const job = { controller, waiters: new Set(), promise: null };
     job.promise = (async () => {
+        const now = Date.now();
+        if (now < playbackChannelCooldownUntil) {
+            // Rate-limited log: a refresh storm hits this once per second, not once per call.
+            if (now - playbackChannelCooldownLoggedAt > 1000) {
+                playbackChannelCooldownLoggedAt = now;
+                logger.warn('AppSource', `播放通道处于冷却期（${Math.ceil((playbackChannelCooldownUntil - now) / 1000)}s），跳过本次上游取址`);
+            }
+            throw Object.assign(new Error('播放接口空响应冷却中，请稍后重试'), { code: 'EMPTY_RESPONSE', cooldown: true });
+        }
         const payload = JSON.stringify({
             biz_param: { detail_page_version: 0, device_level: 1, disable_digg_stat: false, disable_video_relate_book: false, need_all_video_definition: true, need_mp4_align: false, use_os_player: false, use_server_dns: false, video_platform: 1024 },
             mixed_video_id_map: { '1004': batch },
-            dr_scene: 'player',
+            dr_scene: 'preload',
         });
         const playbackId = crypto.randomUUID();
         const execRequestJson = (url, requestOptions, ...args) => (module.exports.requestJson || requestJson)(url,
@@ -736,7 +862,7 @@ async function resolveUpstreamEntry(vid, batch, refresh, callerSignal) {
             logger.info('AppSource', `新设备刚完成注册可能仍在跨集群同步中，等待 ${FRESH_DEVICE_RETRY_DELAY_MS}ms 后重试播放通道...`);
             await sleepWithSignal(FRESH_DEVICE_RETRY_DELAY_MS, internalSignal);
             const retrySteps = [
-                { kind: 'multi', apiBase: 'https://api5-normal-lq.fqnovel.com/novel/player/multi_video_model/player/v1' },
+                { kind: 'multi', apiBase: 'https://api5-normal-lq.fqnovel.com/novel/player/multi_video_model/preload/v1' },
                 { kind: 'multi', apiBase: VIDEO_API },
                 { kind: 'shortplay', apiBase: SHORTPLAY_API },
                 { kind: 'shortplay', apiBase: 'https://api5-normal-lq.fqnovel.com/novel/player/video_model/v1/' },
@@ -744,10 +870,27 @@ async function resolveUpstreamEntry(vid, batch, refresh, callerSignal) {
             result = await runPlaybackSteps(retrySteps, vid, payload, device, execRequestJson, deadline, internalSignal);
         }
 
+        if (!result.response && (result.allEmpty || result.lastError?.code === 'EMPTY_RESPONSE')) {
+            logger.warn('AppSource', '播放 POST 通道全部返回空响应，降级尝试 v5 单集与 GET video_tab 备用通道...');
+            result = await runPlaybackSteps(
+                [
+                    ...V5_SINGLE_APIS.map(apiBase => ({ kind: 'single', apiBase })),
+                    ...TAB_APIS.map(apiBase => ({ kind: 'tab', apiBase })),
+                ],
+                vid, payload, device, execRequestJson, deadline, internalSignal);
+        }
+
+        if (!result.response && result.allEmpty) {
+            playbackChannelCooldownUntil = Math.max(playbackChannelCooldownUntil, Date.now() + PLAYBACK_CHANNEL_COOLDOWN_MS);
+            logger.warn('AppSource', `全部播放通道（POST+video_tab）均返回空响应，进入 ${PLAYBACK_CHANNEL_COOLDOWN_MS / 1000}s 冷却期，避免加重服务端限流`);
+        }
+
+        if (result.response) playbackChannelCooldownUntil = 0;
+
         if (!result.response) {
             throw result.lastError || Object.assign(new Error('App 接口未返回所选分集，已停止取址'), { code: 'MISSING_MODEL' });
         }
-        const currentEntry = result.response.data?.[vid] || entryCache.get(vid)?.entry;
+        const currentEntry = extractModelEntries(result.response.data)?.[vid] || entryCache.get(vid)?.entry;
         if (!currentEntry) throw Object.assign(new Error('App 接口未返回所选分集，已停止取址'), { code: 'MISSING_MODEL' });
         return currentEntry;
     })().finally(() => {
@@ -797,4 +940,4 @@ async function fetchAppPlayUrl(vid, options = {}) {
     return await parseEntryPlayInfo(vid, currentEntry, requestedQuality, allowLowerQuality, deadline, signal, options.allowBytevc2 === true, allowHevc, allowHevcTranscode);
 }
 
-module.exports = { fetchAppPlayUrl, clearEntryCache, isHevcCodec, signedSearchRequest, signedMetadataRequest, parseSearchInteger, requestJson, playbackRequest, shortplayRequest, SEARCH_API, SEARCH_UA };
+module.exports = { fetchAppPlayUrl, clearEntryCache, isHevcCodec, signedSearchRequest, signedMetadataRequest, parseSearchInteger, requestJson, playbackRequest, singleVideoModelRequest, shortplayRequest, SEARCH_API, SEARCH_UA };

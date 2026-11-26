@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { createHash } = require('node:crypto');
 const {
-    hashF13V5, AesV3V5, branchV5, signPlaybackV5, encodeValues,
+    hashF13V5, AesV3V5, branchV5, signPlaybackV5, encodeValues, formatDeviceToken,
 } = require('../../src/server/native/v5-sign');
 
 const hex = value => Buffer.from(value, 'hex');
@@ -37,10 +37,11 @@ test('v5 hashF13 matches independent SDK digest vectors across timestamp rotatio
 test('v5 playback signing searches only _rticket and binds compressed body and identity', () => {
     const body = Buffer.from([0x1f, 0x8b, 0x08, 0x00, 0x01, 0x02, 0x03, 0x04]);
     const values = {
-        aid: '8662', app_name: 'novelread', version_code: '74332', version_name: '7.4.3.32',
-        channel: 'vivo_8662_64', device_platform: 'android', device_type: 'PGT-AN10',
-        os_version: '12', update_version_code: '74332',
-        iid: '456', cdid: 'synthetic-cdid', device_id: '123',
+        aid: '8662', app_name: 'novelread', version_code: '74532', version_name: '7.4.5.32',
+        update_version_code: '74532', manifest_version_code: '74532', os: 'android', ssmix: 'a',
+        channel: 'update_64', device_platform: 'android', device_type: '25053RT47C',
+        device_brand: 'Redmi', os_version: '16', os_api: '36', ac: 'wifi', language: 'zh',
+        host_abi: 'arm64-v8a', iid: '456', cdid: 'synthetic-cdid', device_id: '123',
     };
     const now = 1800000000000;
     const ts = Math.floor(now / 1000);
@@ -61,10 +62,56 @@ test('v5 playback signing searches only _rticket and binds compressed body and i
     assert.ok(signed.headers['x-helios'].length > 20);
 });
 
+test('v5 playback signing matches verified envelope wire contract byte-for-byte', () => {
+    const fixture = JSON.parse(fs.readFileSync(path.join(vectorsDir, 'signing-v5-playback-envelope.json'), 'utf8'));
+    const identity = {};
+    for (const key of fixture.queryOrder) {
+        identity[key] = fixture.identity[key];
+    }
+    const body = Buffer.from(fixture.body, 'base64');
+    const signed = signPlaybackV5('https://example.test/model', identity, body, 1800000000000, {
+        random: () => 0.5,
+        nonce: 'synthetic',
+        started: 1800000000000,
+    });
+    assert.equal(signed.url, fixture.url);
+    assert.deepEqual(Object.keys(signed.headers).sort(), Object.keys(fixture.headers).sort());
+    for (const [key, value] of Object.entries(fixture.headers)) {
+        assert.equal(signed.headers[key], value, `header ${key} matches fixture`);
+    }
+});
+
+test('formatDeviceToken pads short nonces to 25 chars starting with A and preserves conforming tokens', () => {
+    assert.equal(formatDeviceToken('synthetic'), 'AsyntheticAAAAAAAAAAAAAAA');
+    assert.equal(formatDeviceToken('synthetic').length, 25);
+    assert.equal(formatDeviceToken(''), 'AAAAAAAAAAAAAAAAAAAAAAAAA');
+    const valid = 'Abcdefghijklmnopqrstuvwxy';
+    assert.equal(valid.length, 25);
+    assert.equal(formatDeviceToken(valid), valid);
+    const overlong = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123';
+    assert.equal(formatDeviceToken(overlong), 'AABCDEFGHIJKLMNOPQRSTUVWX');
+    assert.equal(formatDeviceToken(overlong).length, 25);
+});
+
+test('v5 empty-body GET signing uses MD5 of empty bytes and omits POST headers', () => {
+    const values = {
+        aid: '8662', app_name: 'novelread', version_code: '74532', version_name: '7.4.5.32',
+        channel: 'update_64', device_platform: 'android', device_type: '25053RT47C',
+        os_version: '16', update_version_code: '74532',
+        iid: '456', cdid: 'synthetic-cdid', device_id: '123',
+    };
+    const now = 1800000000000;
+    const ts = Math.floor(now / 1000);
+    const signed = signPlaybackV5('https://example.test/tab', values, Buffer.alloc(0), now);
+    const url = new URL(signed.url);
+    assert.equal(branchV5(url.search.slice(1), Buffer.alloc(0), ts), 0);
+    assert.deepEqual(Object.keys(signed.headers).sort(), ['x-helios', 'x-khronos', 'x-medusa']);
+});
+
 test('v5 signing rejects invalid branch inputs deterministically', () => {
     const query = createHash('sha256').update('bad').digest().subarray(0, 32);
     const body = createHash('md5').update('body').digest();
     // A wrong ts almost never lands on branch 12; hashF13V5 must refuse it.
     assert.throws(() => hashF13V5(query, body, 1800000000), /v5 hash branch unsupported/);
-    assert.equal(typeof encodeValues({ a: '7.4.3.32', b: '~x y' }), 'string');
+    assert.equal(typeof encodeValues({ a: '7.4.5.32', b: '~x y' }), 'string');
 });
